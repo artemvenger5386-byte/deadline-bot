@@ -64,7 +64,7 @@ async def cmd_add(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO deadlines (chat_id, subject, deadline_date) VALUES ($1, $2, $3)", message.chat.id, subject, date_str)
@@ -79,7 +79,7 @@ async def cmd_list(message: types.Message):
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 ORDER BY deadline_date", message.chat.id)
     if not rows:
-        await message.answer("📭 Нет активных дедлайнов.")
+        await message.answer(" Нет активных дедлайнов.")
         return
     text = "📋 Твои дедлайны:\n"
     for row in rows:
@@ -92,16 +92,16 @@ async def cmd_list(message: types.Message):
 async def cmd_done(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ Формат: /done <ID>\nПример: /done 5")
+        await message.answer(" Формат: /done <ID>\nПример: /done 5")
         return
     try:
         deadline_id = int(args[1])
     except ValueError:
-        await message.answer("❌ ID должен быть числом")
+        await message.answer(" ID должен быть числом")
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("️ База данных недоступна.")
+        await message.answer("⚠️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         result = await conn.execute("UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
@@ -158,10 +158,10 @@ async def send_reminders():
                 reminder_text = None
                 if deadline_date == today:
                     reminder_type = "today"
-                    reminder_text = f"🔔 СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f" СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == tomorrow:
                     reminder_type = "tomorrow"
-                    reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f" ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == day_after:
                     reminder_type = "day_after"
                     reminder_text = f"📅 Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
