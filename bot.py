@@ -1,11 +1,12 @@
 import asyncio
 import os
+import threading
 import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
-from aiohttp import web
+from flask import Flask
 
 load_dotenv()
 
@@ -21,7 +22,7 @@ async def get_db_pool():
             db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
             print("✅ Подключено к Supabase")
         except Exception as e:
-            print(f"⚠️ Ошибка подключения к БД: {e}")
+            print(f"️ Ошибка подключения к БД: {e}")
     return db_pool
 
 async def init_db():
@@ -196,37 +197,37 @@ async def send_reminders():
     except Exception as e:
         print(f"Ошибка проверки напоминаний: {e}")
 
-async def handle(request):
-    try:
-        await send_reminders()
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    return web.Response(text="Bot is running! Reminders checked.")
+# Flask HTTP-сервер
+app = Flask(__name__)
 
-async def start_bot_polling(app):
-    """Запускает polling бота в фоне"""
-    print("🚀 Запускаю Telegram-бота в фоне...")
-    asyncio.create_task(dp.start_polling(bot))
+@app.route('/')
+def home():
+    """Главная страница — отвечает UptimeRobot"""
+    return "Bot is running! Reminders checked."
 
-async def on_startup(app):
-    """Инициализация при запуске"""
+def run_flask():
+    """Запускает Flask в отдельном потоке"""
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+async def main():
+    """Главная функция"""
+    # Инициализируем БД
     try:
         await init_db()
     except Exception as e:
-        print(f"️ Ошибка init_db: {e}")
+        print(f"⚠️ Ошибка init_db: {e}")
     
-    # Запускаем бота в фоне
-    await start_bot_polling(app)
-
-def main():
-    app = web.Application()
-    app.on_startup.append(on_startup)
-    app.router.add_get('/', handle)
+    print("🚀 Запускаю Telegram-бота...")
     
-    port = int(os.environ.get('PORT', 10000))
-    print(f"🌐 Запуск HTTP-сервера на порту {port}...")
-    
-    web.run_app(app, host='0.0.0.0', port=port, print=None)
+    # Запускаем бота
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    main()
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("🌐 HTTP-сервер запущен")
+    
+    # Запускаем бота в главном потоке
+    asyncio.run(main())
