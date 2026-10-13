@@ -12,7 +12,6 @@ load_dotenv()
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
 
-# Пул соединений с базой данных Supabase
 db_pool = None
 
 async def get_db_pool():
@@ -21,7 +20,6 @@ async def get_db_pool():
         db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
     return db_pool
 
-# Инициализация базы данных
 async def init_db():
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -44,7 +42,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
-    await message.answer("📖 Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
+    await message.answer(" Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
 
 @dp.message(Command('add'))
 async def cmd_add(message: types.Message):
@@ -103,7 +101,7 @@ async def cmd_done(message: types.Message):
         result = await conn.execute("UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
     
     if result == "UPDATE 0":
-        await message.answer("❌ Дедлайн не найден")
+        await message.answer(" Дедлайн не найден")
     else:
         await message.answer(f"✅ Дедлайн #{deadline_id} отмечен как выполненный!")
 
@@ -171,8 +169,11 @@ async def send_reminders():
                     print(f"Ошибка отправки: {e}")
 
 async def handle(request):
-    await send_reminders()
-    return web.Response(text="Bot is running!")
+    try:
+        await send_reminders()
+    except Exception as e:
+        print(f"Ошибка проверки напоминаний: {e}")
+    return web.Response(text="Bot is running! Reminders checked.")
 
 async def start_http_server():
     app = web.Application()
@@ -182,10 +183,13 @@ async def start_http_server():
     port = int(os.environ.get('PORT', 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"🌐 HTTP server on port {port}")
+    print(f" HTTP server started on port {port}")
 
 async def main():
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"⚠️ Ошибка инициализации БД: {e}")
     print("🚀 Запускаю бота...")
     await asyncio.gather(dp.start_polling(bot), start_http_server())
 
