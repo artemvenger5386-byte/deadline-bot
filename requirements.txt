@@ -1,4 +1,5 @@
-   aiogram
-   python-dotenv
-   asyncpg
-   flask
+aiogram
+python-dotenv
+asyncpg
+fastapi
+uvicorn
