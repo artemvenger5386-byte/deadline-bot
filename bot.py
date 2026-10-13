@@ -6,7 +6,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
 from aiohttp import web
-import threading
 
 load_dotenv()
 
@@ -48,7 +47,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
-    await message.answer("📖 Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
+    await message.answer(" Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
 
 @dp.message(Command('add'))
 async def cmd_add(message: types.Message):
@@ -87,7 +86,7 @@ async def cmd_list(message: types.Message):
         rows = await conn.fetch("SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 ORDER BY deadline_date", message.chat.id)
     
     if not rows:
-        await message.answer("📭 Нет активных дедлайнов.")
+        await message.answer(" Нет активных дедлайнов.")
         return
     
     text = "📋 Твои дедлайны:\n\n"
@@ -102,17 +101,17 @@ async def cmd_list(message: types.Message):
 async def cmd_done(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ Формат: /done <ID>\nПример: /done 5")
+        await message.answer(" Формат: /done <ID>\nПример: /done 5")
         return
     try:
         deadline_id = int(args[1])
     except ValueError:
-        await message.answer("❌ ID должен быть числом")
+        await message.answer(" ID должен быть числом")
         return
     
     pool = await get_db_pool()
     if not pool:
-        await message.answer("️ База данных недоступна.")
+        await message.answer("⚠️ База данных недоступна.")
         return
     
     async with pool.acquire() as conn:
@@ -144,7 +143,7 @@ async def cmd_delete(message: types.Message):
         result = await conn.execute("DELETE FROM deadlines WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
     
     if result == "DELETE 0":
-        await message.answer(" Дедлайн не найден")
+        await message.answer("❌ Дедлайн не найден")
     else:
         await message.answer(f"🗑 Дедлайн #{deadline_id} удалён!")
 
@@ -180,7 +179,7 @@ async def send_reminders():
                 
                 if deadline_date == today:
                     reminder_type = "today"
-                    reminder_text = f"🔔 СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f" СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == tomorrow:
                     reminder_type = "tomorrow"
                     reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
@@ -197,7 +196,6 @@ async def send_reminders():
     except Exception as e:
         print(f"Ошибка проверки напоминаний: {e}")
 
-# HTTP-сервер
 async def handle(request):
     try:
         await send_reminders()
@@ -205,37 +203,30 @@ async def handle(request):
         print(f"Ошибка: {e}")
     return web.Response(text="Bot is running! Reminders checked.")
 
-def start_http_server():
-    """Запускает HTTP-сервер в отдельном потоке"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    app = web.Application()
-    app.router.add_get('/', handle)
-    
-    port = int(os.environ.get('PORT', 10000))
-    
-    web.run_app(app, host='0.0.0.0', port=port, print=None)
+async def start_bot_polling(app):
+    """Запускает polling бота в фоне"""
+    print("🚀 Запускаю Telegram-бота в фоне...")
+    asyncio.create_task(dp.start_polling(bot))
 
-async def main():
-    # Запускаем HTTP-сервер в отдельном потоке
-    server_thread = threading.Thread(target=start_http_server, daemon=True)
-    server_thread.start()
-    print("✅ HTTP-сервер запущен")
-    
-    # Ждем 3 секунды, чтобы сервер успел стартовать
-    await asyncio.sleep(3)
-    
-    # Инициализируем БД
+async def on_startup(app):
+    """Инициализация при запуске"""
     try:
         await init_db()
     except Exception as e:
-        print(f"⚠️ Ошибка init_db: {e}")
+        print(f"️ Ошибка init_db: {e}")
     
-    print("🚀 Запускаю Telegram-бота...")
+    # Запускаем бота в фоне
+    await start_bot_polling(app)
+
+def main():
+    app = web.Application()
+    app.on_startup.append(on_startup)
+    app.router.add_get('/', handle)
     
-    # Запускаем бота
-    await dp.start_polling(bot)
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🌐 Запуск HTTP-сервера на порту {port}...")
+    
+    web.run_app(app, host='0.0.0.0', port=port, print=None)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
