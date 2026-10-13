@@ -1,18 +1,17 @@
 import asyncio
 import os
-import threading
 import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
-from flask import Flask
+from fastapi import FastAPI
+import uvicorn
 
 load_dotenv()
 
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
-
 db_pool = None
 
 async def get_db_pool():
@@ -40,15 +39,15 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-        print("✅ Таблица deadlines готова")
+            print("✅ Таблица deadlines готова")
 
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
-    await message.answer(f"Привет, {message.from_user.first_name}! 👋\n\nЯ бот для управления дедлайнами.\nИспользуй /help, чтобы узнать команды.")
+    await message.answer(f"Привет, {message.from_user.first_name}! 👋\nЯ бот для управления дедлайнами.\nИспользуй /help, чтобы узнать команды.")
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
-    await message.answer(" Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
+    await message.answer("📖 Команды:\n/start — начать\n/help — справка\n/add <предмет> <ДД.ММ.ГГГГ> — добавить дедлайн\n/list — список дедлайнов\n/done <ID> — отметить выполненным\n/delete <ID> — удалить дедлайн\n/check — проверить напоминания")
 
 @dp.message(Command('add'))
 async def cmd_add(message: types.Message):
@@ -56,24 +55,19 @@ async def cmd_add(message: types.Message):
     if len(args) < 3:
         await message.answer("❌ Формат: /add <предмет> <ДД.ММ.ГГГГ>\nПример: /add Математика 15.10.2026")
         return
-    
     subject = args[1]
     date_str = args[2]
-    
     try:
         datetime.strptime(date_str, "%d.%m.%Y")
     except ValueError:
         await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
-    
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна. Попробуй позже.")
+        await message.answer("⚠️ База данных недоступна.")
         return
-    
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO deadlines (chat_id, subject, deadline_date) VALUES ($1, $2, $3)", message.chat.id, subject, date_str)
-    
     await message.answer(f"✅ Дедлайн добавлен: {subject} на {date_str}")
 
 @dp.message(Command('list'))
@@ -82,19 +76,15 @@ async def cmd_list(message: types.Message):
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
         return
-    
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 ORDER BY deadline_date", message.chat.id)
-    
     if not rows:
-        await message.answer(" Нет активных дедлайнов.")
+        await message.answer("📭 Нет активных дедлайнов.")
         return
-    
-    text = "📋 Твои дедлайны:\n\n"
+    text = "📋 Твои дедлайны:\n"
     for row in rows:
         status = "✅" if row['is_done'] else "⏳"
         text += f"{row['id']}. {status} {row['subject']} — {row['deadline_date']}\n"
-    
     text += "\nИспользуй /done <ID> или /delete <ID>"
     await message.answer(text)
 
@@ -102,22 +92,19 @@ async def cmd_list(message: types.Message):
 async def cmd_done(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer(" Формат: /done <ID>\nПример: /done 5")
+        await message.answer("❌ Формат: /done <ID>\nПример: /done 5")
         return
     try:
         deadline_id = int(args[1])
     except ValueError:
-        await message.answer(" ID должен быть числом")
+        await message.answer("❌ ID должен быть числом")
         return
-    
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
         return
-    
     async with pool.acquire() as conn:
         result = await conn.execute("UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
-    
     if result == "UPDATE 0":
         await message.answer("❌ Дедлайн не найден")
     else:
@@ -134,15 +121,12 @@ async def cmd_delete(message: types.Message):
     except ValueError:
         await message.answer("❌ ID должен быть числом")
         return
-    
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
         return
-    
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM deadlines WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
-    
     if result == "DELETE 0":
         await message.answer("❌ Дедлайн не найден")
     else:
@@ -150,44 +134,37 @@ async def cmd_delete(message: types.Message):
 
 @dp.message(Command('check'))
 async def cmd_check(message: types.Message):
-    await message.answer("🔍 Проверяю дедлайны...")
+    await message.answer(" Проверяю дедлайны...")
     await send_reminders()
     await message.answer("✅ Проверка завершена!")
 
 async def send_reminders():
     pool = await get_db_pool()
     if not pool:
-        print("⚠️ БД недоступна, напоминания пропущены")
         return
-    
     now = datetime.now()
     today = now.date()
     tomorrow = today + timedelta(days=1)
     day_after = today + timedelta(days=2)
-    
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch("SELECT id, chat_id, subject, deadline_date, last_reminder FROM deadlines WHERE is_done = FALSE")
-            
             for row in rows:
                 try:
                     deadline_date = datetime.strptime(row['deadline_date'], "%d.%m.%Y").date()
                 except ValueError:
                     continue
-                
                 reminder_type = None
                 reminder_text = None
-                
                 if deadline_date == today:
                     reminder_type = "today"
-                    reminder_text = f" СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f"🔔 СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == tomorrow:
                     reminder_type = "tomorrow"
-                    reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f" ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == day_after:
                     reminder_type = "day_after"
-                    reminder_text = f"📅 Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
-                
+                    reminder_text = f" Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
                 if reminder_type and row['last_reminder'] != reminder_type:
                     try:
                         await bot.send_message(row['chat_id'], reminder_text)
@@ -197,37 +174,29 @@ async def send_reminders():
     except Exception as e:
         print(f"Ошибка проверки напоминаний: {e}")
 
-# Flask HTTP-сервер
-app = Flask(__name__)
+# FastAPI приложение
+app = FastAPI()
 
-@app.route('/')
-def home():
-    """Главная страница — отвечает UptimeRobot"""
-    return "Bot is running! Reminders checked."
+@app.get("/")
+async def root():
+    await send_reminders()
+    return {"message": "Bot is running! Reminders checked."}
 
-def run_flask():
-    """Запускает Flask в отдельном потоке"""
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-async def main():
-    """Главная функция"""
-    # Инициализируем БД
-    try:
-        await init_db()
-    except Exception as e:
-        print(f"⚠️ Ошибка init_db: {e}")
-    
+async def start_bot():
+    await init_db()
     print("🚀 Запускаю Telegram-бота...")
-    
-    # Запускаем бота
     await dp.start_polling(bot)
 
+def main():
+    # Запускаем бота в фоновой задаче
+    asyncio.create_task(start_bot())
+    # Запускаем FastAPI сервер
+    port = int(os.environ.get('PORT', 10000))
+    uvicorn.run(app, host='0.0.0.0', port=port)
+
 if __name__ == '__main__':
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print("🌐 HTTP-сервер запущен")
-    
-    # Запускаем бота в главном потоке
-    asyncio.run(main())
+    main()
