@@ -6,6 +6,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
 from aiohttp import web
+import threading
 
 load_dotenv()
 
@@ -111,7 +112,7 @@ async def cmd_done(message: types.Message):
     
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     
     async with pool.acquire() as conn:
@@ -143,9 +144,9 @@ async def cmd_delete(message: types.Message):
         result = await conn.execute("DELETE FROM deadlines WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
     
     if result == "DELETE 0":
-        await message.answer("❌ Дедлайн не найден")
+        await message.answer(" Дедлайн не найден")
     else:
-        await message.answer(f" Дедлайн #{deadline_id} удалён!")
+        await message.answer(f"🗑 Дедлайн #{deadline_id} удалён!")
 
 @dp.message(Command('check'))
 async def cmd_check(message: types.Message):
@@ -204,40 +205,26 @@ async def handle(request):
         print(f"Ошибка: {e}")
     return web.Response(text="Bot is running! Reminders checked.")
 
-def run_http_server():
+def start_http_server():
     """Запускает HTTP-сервер в отдельном потоке"""
-    import threading
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    def start_server():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        app = web.Application()
-        app.router.add_get('/', handle)
-        
-        runner = loop.run_until_complete(web.AppRunner(app).__aenter__())
-        loop.run_until_complete(runner.setup())
-        
-        port = int(os.environ.get('PORT', 10000))
-        site = loop.run_until_complete(web.TCPSite(runner, '0.0.0.0', port).__aenter__())
-        
-        print(f"🌐 HTTP server started on port {port}")
-        
-        try:
-            loop.run_forever()
-        except KeyboardInterrupt:
-            loop.run_until_complete(runner.cleanup())
+    app = web.Application()
+    app.router.add_get('/', handle)
     
-    thread = threading.Thread(target=start_server, daemon=True)
-    thread.start()
-    print("✅ HTTP-сервер запущен в отдельном потоке")
+    port = int(os.environ.get('PORT', 10000))
+    
+    web.run_app(app, host='0.0.0.0', port=port, print=None)
 
 async def main():
-    # Запускаем HTTP-сервер первым (в отдельном потоке)
-    run_http_server()
+    # Запускаем HTTP-сервер в отдельном потоке
+    server_thread = threading.Thread(target=start_http_server, daemon=True)
+    server_thread.start()
+    print("✅ HTTP-сервер запущен")
     
-    # Ждем 2 секунды, чтобы сервер успел стартовать
-    await asyncio.sleep(2)
+    # Ждем 3 секунды, чтобы сервер успел стартовать
+    await asyncio.sleep(3)
     
     # Инициализируем БД
     try:
