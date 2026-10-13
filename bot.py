@@ -21,7 +21,7 @@ async def get_db_pool():
             db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
             print("✅ Подключено к Supabase")
         except Exception as e:
-            print(f"️ Ошибка подключения к БД: {e}")
+            print(f"⚠️ Ошибка подключения к БД: {e}")
     return db_pool
 
 async def init_db():
@@ -101,7 +101,7 @@ async def cmd_done(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         result = await conn.execute("UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
@@ -134,7 +134,7 @@ async def cmd_delete(message: types.Message):
 
 @dp.message(Command('check'))
 async def cmd_check(message: types.Message):
-    await message.answer(" Проверяю дедлайны...")
+    await message.answer("🔍 Проверяю дедлайны...")
     await send_reminders()
     await message.answer("✅ Проверка завершена!")
 
@@ -161,10 +161,10 @@ async def send_reminders():
                     reminder_text = f"🔔 СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == tomorrow:
                     reminder_type = "tomorrow"
-                    reminder_text = f" ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == day_after:
                     reminder_type = "day_after"
-                    reminder_text = f" Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f"📅 Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
                 if reminder_type and row['last_reminder'] != reminder_type:
                     try:
                         await bot.send_message(row['chat_id'], reminder_text)
@@ -177,6 +177,14 @@ async def send_reminders():
 # FastAPI приложение
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    """Запускается при старте сервера"""
+    await init_db()
+    # Запускаем бота в фоновой задаче
+    asyncio.create_task(dp.start_polling(bot))
+    print("🚀 Бот запущен в фоне")
+
 @app.get("/")
 async def root():
     await send_reminders()
@@ -186,17 +194,7 @@ async def root():
 async def health():
     return {"status": "ok"}
 
-async def start_bot():
-    await init_db()
-    print("🚀 Запускаю Telegram-бота...")
-    await dp.start_polling(bot)
-
-def main():
-    # Запускаем бота в фоновой задаче
-    asyncio.create_task(start_bot())
-    # Запускаем FastAPI сервер
+# Запуск через uvicorn
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     uvicorn.run(app, host='0.0.0.0', port=port)
-
-if __name__ == '__main__':
-    main()
