@@ -1,3 +1,5 @@
 aiogram
 python-dotenv
 asyncpg
+fastapi
+uvicorn
