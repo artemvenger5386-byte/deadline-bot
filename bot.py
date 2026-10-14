@@ -22,6 +22,14 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '1752124938'))
 TZ = ZoneInfo(os.getenv('TIMEZONE', 'Europe/Moscow'))
 REMINDER_INTERVAL = 60 * 60  # проверка напоминаний раз в час
 
+# --- Награды XP (меняются в одном месте) ---
+XP_ADD_DEADLINE = 5    # за добавление дедлайна
+XP_DONE_DEADLINE = 15  # за выполнение дедлайна
+
+# Шкала уровней: сколько XP нужно для уровня 1, 2, 3, 4, 5.
+# Чтобы добавить уровень, допиши число в конец списка (и название в TITLES).
+LEVEL_THRESHOLDS = [0, 100, 300, 600, 1000]
+
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
 db_pool = None
@@ -107,6 +115,37 @@ TITLES = {1: "🌱 Новичок", 2: "📚 Студент", 3: "🎓 Отли�
 
 def get_title(level: int) -> str:
     return TITLES.get(level, "⚡ Бог продуктивности") if level <= 5 else "⚡ Бог продуктивности"
+
+
+def level_for_xp(xp: int) -> int:
+    """Уровень по количеству XP согласно LEVEL_THRESHOLDS."""
+    level = 1
+    for i, threshold in enumerate(LEVEL_THRESHOLDS):
+        if xp >= threshold:
+            level = i + 1
+    return level
+
+
+def level_progress(xp: int):
+    """Возвращает (процент до следующего уровня, XP до следующего или None на максимуме)."""
+    level = level_for_xp(xp)
+    if level >= len(LEVEL_THRESHOLDS):
+        return 100, None
+    current = LEVEL_THRESHOLDS[level - 1]
+    nxt = LEVEL_THRESHOLDS[level]
+    return int((xp - current) * 100 / (nxt - current)), nxt - xp
+
+
+def levels_scale_text() -> str:
+    return "\n".join(
+        f"• {i + 1} ур. — {get_title(i + 1)} — от {t} XP" for i, t in enumerate(LEVEL_THRESHOLDS)
+    )
+
+
+def level_sql_case() -> str:
+    """SQL-выражение уровня по xp — для пересчёта уровней у существующих пользователей."""
+    parts = [f"WHEN xp >= {t} THEN {i + 1}" for i, t in reversed(list(enumerate(LEVEL_THRESHOLDS)))]
+    return "CASE " + " ".join(parts) + " END"
 
 
 async def send_long(message: types.Message, text: str, **kwargs):
@@ -217,6 +256,8 @@ async def init_db():
                     "UPDATE users SET level = 1 WHERE level IS NULL",
                     "UPDATE users SET is_registered = FALSE WHERE is_registered IS NULL",
                     "UPDATE deadlines SET is_done = FALSE WHERE is_done IS NULL",
+                    # пересчёт уровней по новой шкале (идемпотентно)
+                    f"UPDATE users SET level = {level_sql_case()}",
                 ]
                 for sql in migrations:
                     try:
@@ -292,15 +333,15 @@ async def add_xp(chat_id: int, amount: int):
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "UPDATE users SET xp = xp + $1, level = ((xp + $1) / 100) + 1 "
-                "WHERE chat_id = $2 RETURNING xp",
+                "UPDATE users SET xp = xp + $1 WHERE chat_id = $2 RETURNING xp",
                 amount, chat_id
             )
-        if not row:
-            return None
-        new_xp = row['xp']
-        old_level = ((new_xp - amount) // 100) + 1
-        new_level = (new_xp // 100) + 1
+            if not row:
+                return None
+            new_xp = row['xp']
+            old_level = level_for_xp(new_xp - amount)
+            new_level = level_for_xp(new_xp)
+            await conn.execute("UPDATE users SET level = $1 WHERE chat_id = $2", new_level, chat_id)
         if new_level > old_level:
             return new_level
     except Exception as e:
@@ -547,14 +588,15 @@ async def cmd_help(message: types.Message):
         "• /register — регистрация (ФИО и группа)\n"
         "• /cancel — отменить текущее действие\n\n"
         "📚 <b>Дедлайны (после регистрации):</b>\n"
-        "• /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; — добавить (+10 XP)\n"
+        f"• /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [описание] — добавить (+{XP_ADD_DEADLINE} XP)\n"
         "• /list — список дедлайнов\n"
-        "• /done &lt;ID&gt; — отметить выполненным (+50 XP)\n"
+        f"• /done &lt;ID&gt; — отметить выполненным (+{XP_DONE_DEADLINE} XP)\n"
         "• /delete &lt;ID&gt; — удалить\n"
         "• /check — проверить напоминания\n\n"
         "🏆 <b>Рейтинг и профиль:</b>\n"
         "• /profile — мой профиль и уровень\n"
         "• /rating — топ-10 студентов\n\n"
+        f"📈 <b>Уровни:</b>\n{levels_scale_text()}\n\n"
         "💡 <b>Совет:</b> выполняй дедлайны вовремя, чтобы получать больше XP!"
     )
     await message.answer(text, parse_mode="HTML")
@@ -573,29 +615,29 @@ async def cmd_add(message: types.Message):
             parse_mode="HTML"
         )
         return
-    
-    # Парсим дату (последний аргумент)
+
+    # Парсим дату (первое слово после предмета) и описание (всё остальное)
     parts = args[2].split()
     date_str = parts[0]
     description = " ".join(parts[1:]) if len(parts) > 1 else ""
-    
+
     subject = args[1]
     if len(subject) > 100:
-        await message.answer(" Название предмета слишком длинное (макс. 100 символов).")
+        await message.answer("❌ Название предмета слишком длинное (макс. 100 символов).")
         return
     if len(description) > 500:
         await message.answer("❌ Описание слишком длинное (макс. 500 символов).")
         return
-    
+
     try:
         deadline = datetime.strptime(date_str, "%d.%m.%Y").date()
     except ValueError:
-        await message.answer(" Неверный формат даты. Используй ДД.ММ.ГГГГ")
+        await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
     if deadline < today_date():
         await message.answer("❌ Эта дата уже прошла. Укажи сегодняшнюю или будущую дату.")
         return
-    
+
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
@@ -606,11 +648,12 @@ async def cmd_add(message: types.Message):
                 "INSERT INTO deadlines (chat_id, subject, deadline_date, description) VALUES ($1, $2, $3, $4)",
                 message.chat.id, subject, date_str, description
             )
-        new_level = await add_xp(message.chat.id, 10)
-        
+        new_level = await add_xp(message.chat.id, XP_ADD_DEADLINE)
+
         desc_text = f"\n📝 {esc(description)}" if description else ""
         await message.answer(
-            f"✅ <b>Дедлайн добавлен!</b>\n\n📚 {esc(subject)}\n📅 {date_str}{desc_text}{xp_message(10, new_level)}",
+            f"✅ <b>Дедлайн добавлен!</b>\n\n📚 {esc(subject)}\n📅 {date_str}{desc_text}"
+            f"{xp_message(XP_ADD_DEADLINE, new_level)}",
             parse_mode="HTML"
         )
         await log_action(message.chat.id, message.from_user.username or "anon", "add", f"{subject} {date_str}")
@@ -646,7 +689,7 @@ async def cmd_list(message: types.Message):
             status = "✅" if row['is_done'] else "⏳"
             text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {row['deadline_date']}\n"
             if row.get('description'):
-                text += f"    {esc(row['description'])}\n"
+                text += f"   📝 {esc(row['description'])}\n"
             text += "\n"
         text += "💡 Используй /done &lt;ID&gt; или /delete &lt;ID&gt;"
         await send_long(message, text, parse_mode="HTML")
@@ -689,9 +732,9 @@ async def cmd_done(message: types.Message):
             else:
                 await message.answer("❌ Дедлайн не найден")
             return
-        new_level = await add_xp(message.chat.id, 50)
+        new_level = await add_xp(message.chat.id, XP_DONE_DEADLINE)
         await message.answer(
-            f"✅ <b>Дедлайн #{deadline_id} выполнен!</b>{xp_message(50, new_level)}",
+            f"✅ <b>Дедлайн #{deadline_id} выполнен!</b>{xp_message(XP_DONE_DEADLINE, new_level)}",
             parse_mode="HTML"
         )
         await log_action(message.chat.id, message.from_user.username or "anon", "done", f"ID {deadline_id}")
@@ -767,11 +810,12 @@ async def cmd_profile(message: types.Message):
         done = done or 0
         active = total - done
         xp = row['xp'] if row else 0
-        level = row['level'] if row else 1
         display_name = format_user_name(row['full_name'] if row else None, row['username'] if row else None)
         group_number = describe_group(row['group_number'] if row else None)
-        progress = xp % 100
+        level = level_for_xp(xp)
+        progress, to_next = level_progress(xp)
         bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+        to_next_text = f"до следующего: {to_next}" if to_next is not None else "максимальный уровень 🎉"
         text = (
             f"╔══════════════════════════╗\n"
             f"        👤 <b>ТВОЙ ПРОФИЛЬ</b>\n"
@@ -779,7 +823,7 @@ async def cmd_profile(message: types.Message):
             f"👤 <b>ФИО:</b> {display_name}\n"
             f"🎓 <b>Группа:</b> {group_number}\n"
             f"🏆 <b>Уровень:</b> {level} — {get_title(level)}\n"
-            f"⭐ <b>XP:</b> {xp} (до следующего: {100 - progress})\n"
+            f"⭐ <b>XP:</b> {xp} ({to_next_text})\n"
             f"📊 <b>Прогресс:</b> [{bar}] {progress}%\n\n"
             f"📚 <b>Статистика:</b>\n"
             f"• Всего дедлайнов: {total}\n"
@@ -1006,7 +1050,7 @@ async def btn_add(message: types.Message):
         "Формат: <code>/add Предмет ДД.ММ.ГГГГ [описание]</code>\n\n"
         "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10</code>\n\n"
         "Описание необязательно, но полезно!\n\n"
-        "🎁 +10 XP за каждый дедлайн!",
+        f"🎁 +{XP_ADD_DEADLINE} XP за каждый дедлайн!",
         parse_mode="HTML"
     )
 
@@ -1024,7 +1068,7 @@ async def btn_done(message: types.Message):
         "✅ <b>Отметить выполненным</b>\n\n"
         "Формат: <code>/done ID</code>\n\n"
         "Пример: <code>/done 5</code>\n\n"
-        "🎁 +50 XP за выполнение!",
+        f"🎁 +{XP_DONE_DEADLINE} XP за выполнение!",
         parse_mode="HTML"
     )
 
