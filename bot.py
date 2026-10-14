@@ -1,31 +1,31 @@
 import asyncio
 import os
+import threading
 import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
-import uvicorn
+from flask import Flask
 
 load_dotenv()
+
+# 🔒 ТВОЙ АДМИН ID
+ADMIN_ID = 1752124938
 
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
 db_pool = None
 
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
 async def get_db_pool():
     global db_pool
     if db_pool is None:
         try:
-            # ВАЖНО: pool_size=5, чтобы не превысить лимит Supabase (15)
-            db_pool = await asyncpg.create_pool(
-                os.getenv('DATABASE_URL'),
-                min_size=2,
-                max_size=5
-            )
-            print("✅ Подключено к Supabase (pool_size=5)")
+            db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
+            print("✅ Подключено к Supabase")
         except Exception as e:
             print(f"⚠️ Ошибка подключения к БД: {e}")
     return db_pool
@@ -45,11 +45,32 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            print("✅ Таблица deadlines готова")
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS activity_logs (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    user_name TEXT,
+                    action TEXT,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            print("✅ Таблицы готовы")
 
+async def log_action(chat_id: int, user_name: str, action: str, details: str = ""):
+    pool = await get_db_pool()
+    if pool:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO activity_logs (chat_id, user_name, action, details) VALUES ($1, $2, $3, $4)",
+                chat_id, user_name, action, details
+            )
+
+# --- ОБЫЧНЫЕ КОМАНДЫ ---
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
     await message.answer(f"Привет, {message.from_user.first_name}! 👋\nЯ бот для управления дедлайнами.\nИспользуй /help, чтобы узнать команды.")
+    await log_action(message.chat.id, message.from_user.username or "anon", "start")
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
@@ -59,14 +80,13 @@ async def cmd_help(message: types.Message):
 async def cmd_add(message: types.Message):
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("❌ Формат: /add <предмет> <ДД.ММ.ГГГГ>\nПример: /add Математика 15.10.2026")
+        await message.answer(" Формат: /add <предмет> <ДД.ММ.ГГГГ>\nПример: /add Математика 15.10.2026")
         return
-    subject = args[1]
-    date_str = args[2]
+    subject, date_str = args[1], args[2]
     try:
         datetime.strptime(date_str, "%d.%m.%Y")
     except ValueError:
-        await message.answer(" Неверный формат даты. Используй ДД.ММ.ГГГГ")
+        await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
     pool = await get_db_pool()
     if not pool:
@@ -75,12 +95,13 @@ async def cmd_add(message: types.Message):
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO deadlines (chat_id, subject, deadline_date) VALUES ($1, $2, $3)", message.chat.id, subject, date_str)
     await message.answer(f"✅ Дедлайн добавлен: {subject} на {date_str}")
+    await log_action(message.chat.id, message.from_user.username or "anon", "add", f"{subject} {date_str}")
 
 @dp.message(Command('list'))
 async def cmd_list(message: types.Message):
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 ORDER BY deadline_date", message.chat.id)
@@ -134,13 +155,13 @@ async def cmd_delete(message: types.Message):
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM deadlines WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
     if result == "DELETE 0":
-        await message.answer(" Дедлайн не найден")
+        await message.answer("❌ Дедлайн не найден")
     else:
         await message.answer(f"🗑 Дедлайн #{deadline_id} удалён!")
 
 @dp.message(Command('check'))
 async def cmd_check(message: types.Message):
-    await message.answer("🔍 Проверяю дедлайны...")
+    await message.answer(" Проверяю дедлайны...")
     await send_reminders()
     await message.answer("✅ Проверка завершена!")
 
@@ -180,27 +201,105 @@ async def send_reminders():
     except Exception as e:
         print(f"Ошибка проверки напоминаний: {e}")
 
-# FastAPI приложение
-app = FastAPI()
+# --- АДМИН-КОМАНДЫ (ТОЛЬКО ДЛЯ ТЕБЯ!) ---
+@dp.message(Command('admin'))
+async def cmd_admin(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён! Эта команда только для администратора.")
+        return
+    pool = await get_db_pool()
+    if not pool:
+        await message.answer("⚠️ База данных недоступна")
+        return
+    async with pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM deadlines")
+        total_deadlines = await conn.fetchval("SELECT COUNT(*) FROM deadlines")
+        active = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE is_done = FALSE")
+    text = f"📊 <b>Админ-панель</b>\n\n👥 Пользователей: <b>{total_users}</b>\n📋 Всего дедлайнов: <b>{total_deadlines}</b>\n⏳ Активных: <b>{active}</b>\n\n<b>Команды:</b>\n/users — список пользователей\n/logs — последние действия\n/broadcast <текст> — рассылка"
+    await message.answer(text, parse_mode="HTML")
+    await log_action(message.chat.id, "admin", "admin_panel")
 
-@app.on_event("startup")
-async def startup_event():
-    await init_db()
-    asyncio.create_task(dp.start_polling(bot))
-    print("🚀 Бот запущен в фоне")
+@dp.message(Command('users'))
+async def cmd_users(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT chat_id, COUNT(*) as count FROM deadlines GROUP BY chat_id ORDER BY count DESC")
+    if not rows:
+        await message.answer("Пользователей пока нет")
+        return
+    text = f" <b>Пользователи ({len(rows)}):</b>\n\n"
+    for row in rows:
+        text += f"• ID: <code>{row['chat_id']}</code> — {row['count']} дедлайнов\n"
+    await message.answer(text, parse_mode="HTML")
 
-# Поддержка и GET, и HEAD запросов (для UptimeRobot)
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root(request: Request):
-    if request.method == "HEAD":
-        return PlainTextResponse("Bot is running!", status_code=200)
-    await send_reminders()
-    return {"message": "Bot is running! Reminders checked."}
+@dp.message(Command('logs'))
+async def cmd_logs(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_name, action, details, created_at FROM activity_logs ORDER BY created_at DESC LIMIT 15")
+    if not rows:
+        await message.answer("Логи пусты")
+        return
+    text = "📋 <b>Последние действия:</b>\n\n"
+    for row in rows:
+        time_str = row['created_at'].strftime("%d.%m %H:%M")
+        text += f"[{time_str}] <b>{row['user_name'] or 'anon'}</b>: {row['action']}"
+        if row['details']: text += f" — {row['details']}"
+        text += "\n"
+    await message.answer(text, parse_mode="HTML")
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+@dp.message(Command('broadcast'))
+async def cmd_broadcast(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    text_to_send = message.text.replace('/broadcast', '').strip()
+    if not text_to_send:
+        await message.answer("Формат: /broadcast <текст сообщения>")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT chat_id FROM deadlines")
+    sent, failed = 0, 0
+    for row in rows:
+        try:
+            await bot.send_message(row['chat_id'], f"📢 <b>Объявление:</b>\n\n{text_to_send}", parse_mode="HTML")
+            sent += 1
+        except:
+            failed += 1
+    await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
+    await log_action(message.chat.id, "admin", "broadcast", text_to_send[:30])
+
+# Flask HTTP-сервер
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running! Reminders checked."
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+async def main():
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"⚠️ Ошибка init_db: {e}")
+    print("🚀 Запускаю Telegram-бота...")
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("🌐 HTTP-сервер запущен")
+    asyncio.run(main())
