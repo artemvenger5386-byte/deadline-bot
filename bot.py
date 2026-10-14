@@ -10,9 +10,14 @@ from flask import Flask
 
 load_dotenv()
 
+ADMIN_ID = 1752124938
+
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
 db_pool = None
+
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
 async def get_db_pool():
     global db_pool
@@ -21,7 +26,7 @@ async def get_db_pool():
             db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
             print("✅ Подключено к Supabase")
         except Exception as e:
-            print(f"️ Ошибка подключения к БД: {e}")
+            print(f"⚠️ Ошибка подключения к БД: {e}")
     return db_pool
 
 async def init_db():
@@ -40,43 +45,27 @@ async def init_db():
                 )
             ''')
             await conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_stats (
-                    chat_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    full_name TEXT,
-                    total_deadlines INTEGER DEFAULT 0,
-                    completed_deadlines INTEGER DEFAULT 0,
-                    xp INTEGER DEFAULT 0,
-                    level INTEGER DEFAULT 1,
+                CREATE TABLE IF NOT EXISTS activity_logs (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    user_name TEXT,
+                    action TEXT,
+                    details TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             print("✅ Таблицы готовы")
 
-async def update_user_stats(chat_id: int, username: str, full_name: str, completed: bool = False):
-    """Обновляет статистику пользователя"""
+async def log_action(chat_id: int, user_name: str, action: str, details: str = ""):
     pool = await get_db_pool()
     if pool:
         async with pool.acquire() as conn:
-            if completed:
-                await conn.execute('''
-                    INSERT INTO user_stats (chat_id, username, full_name, total_deadlines, completed_deadlines, xp)
-                    VALUES ($1, $2, $3, 1, 1, 50)
-                    ON CONFLICT (chat_id) DO UPDATE SET
-                        total_deadlines = user_stats.total_deadlines + 1,
-                        completed_deadlines = user_stats.completed_deadlines + 1,
-                        xp = user_stats.xp + 50,
-                        level = (user_stats.xp + 50) / 100 + 1
-                ''', chat_id, username, full_name)
-            else:
-                await conn.execute('''
-                    INSERT INTO user_stats (chat_id, username, full_name, total_deadlines)
-                    VALUES ($1, $2, $3, 1)
-                    ON CONFLICT (chat_id) DO UPDATE SET
-                        total_deadlines = user_stats.total_deadlines + 1,
-                        username = $2,
-                        full_name = $3
-                ''', chat_id, username, full_name)
+            await conn.execute(
+                "INSERT INTO activity_logs (chat_id, user_name, action, details) VALUES ($1, $2, $3, $4)",
+                chat_id, user_name, action, details
+            )
+
+# --- ОБЫЧНЫЕ КОМАНДЫ ---
 
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
@@ -85,16 +74,11 @@ async def cmd_start(message: types.Message):
         "Я бот для управления дедлайнами.\n"
         "Используй /help, чтобы узнать команды."
     )
-    # Обновляем статистику пользователя
-    await update_user_stats(
-        message.chat.id,
-        message.from_user.username or "anon",
-        message.from_user.first_name
-    )
+    await log_action(message.chat.id, message.from_user.username or "anon", "start")
 
 @dp.message(Command('help'))
 async def cmd_help(message: types.Message):
-    await message.answer(
+    text = (
         "📖 Команды:\n"
         "/start — начать\n"
         "/help — справка\n"
@@ -103,9 +87,10 @@ async def cmd_help(message: types.Message):
         "/done <ID> — отметить выполненным\n"
         "/delete <ID> — удалить дедлайн\n"
         "/check — проверить напоминания\n"
-        "/rating — топ пользователей\n"
-        "/profile — твоя статистика"
+        "/profile — твой профиль и уровень\n"
+        "/rating — топ пользователей"
     )
+    await message.answer(text)
 
 @dp.message(Command('add'))
 async def cmd_add(message: types.Message):
@@ -120,7 +105,6 @@ async def cmd_add(message: types.Message):
     except ValueError:
         await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
-    
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
@@ -131,6 +115,7 @@ async def cmd_add(message: types.Message):
             message.chat.id, subject, date_str
         )
     await message.answer(f"✅ Дедлайн добавлен: {subject} на {date_str}")
+    await log_action(message.chat.id, message.from_user.username or "anon", "add", f"{subject} {date_str}")
 
 @dp.message(Command('list'))
 async def cmd_list(message: types.Message):
@@ -146,9 +131,9 @@ async def cmd_list(message: types.Message):
     if not rows:
         await message.answer("📭 Нет активных дедлайнов.")
         return
-    text = " Твои дедлайны:\n"
+    text = "📋 Твои дедлайны:\n"
     for row in rows:
-        status = "✅" if row['is_done'] else ""
+        status = "✅" if row['is_done'] else "⏳"
         text += f"{row['id']}. {status} {row['subject']} — {row['deadline_date']}\n"
     text += "\nИспользуй /done <ID> или /delete <ID>"
     await message.answer(text)
@@ -164,7 +149,6 @@ async def cmd_done(message: types.Message):
     except ValueError:
         await message.answer("❌ ID должен быть числом")
         return
-    
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
@@ -174,17 +158,11 @@ async def cmd_done(message: types.Message):
             "UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2",
             deadline_id, message.chat.id
         )
-        if result == "UPDATE 0":
-            await message.answer("❌ Дедлайн не найден")
-            return
-        # Обновляем статистику
-        await update_user_stats(
-            message.chat.id,
-            message.from_user.username or "anon",
-            message.from_user.first_name,
-            completed=True
-        )
-    await message.answer(f"✅ Дедлайн #{deadline_id} отмечен как выполненный! +50 XP")
+    if result == "UPDATE 0":
+        await message.answer(" Дедлайн не найден")
+    else:
+        await message.answer(f"✅ Дедлайн #{deadline_id} отмечен как выполненный! +50 XP")
+        await log_action(message.chat.id, message.from_user.username or "anon", "done", f"ID {deadline_id}")
 
 @dp.message(Command('delete'))
 async def cmd_delete(message: types.Message):
@@ -197,7 +175,6 @@ async def cmd_delete(message: types.Message):
     except ValueError:
         await message.answer("❌ ID должен быть числом")
         return
-    
     pool = await get_db_pool()
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
@@ -214,9 +191,42 @@ async def cmd_delete(message: types.Message):
 
 @dp.message(Command('check'))
 async def cmd_check(message: types.Message):
-    await message.answer("🔍 Проверяю дедлайны...")
+    await message.answer(" Проверяю дедлайны...")
     await send_reminders()
     await message.answer("✅ Проверка завершена!")
+
+# --- РЕЙТИНГ И ПРОФИЛЬ ---
+
+@dp.message(Command('profile'))
+async def cmd_profile(message: types.Message):
+    pool = await get_db_pool()
+    if not pool:
+        await message.answer("️ База данных недоступна.")
+        return
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE chat_id = $1", message.chat.id)
+        done = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE chat_id = $1 AND is_done = TRUE", message.chat.id)
+    total = total or 0
+    done = done or 0
+    active = total - done
+    xp = done * 50
+    level = (xp // 100) + 1
+    titles = {1: "Новичок", 2: "Студент", 3: "Отличник", 4: "Магистр", 5: "Легенда"}
+    title = titles.get(min(level, 5), "Бог продуктивности")
+    progress = xp % 100
+    bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+    text = (
+        f"👤 ТВОЙ ПРОФИЛЬ\n\n"
+        f"🏆 Уровень: {level} — {title}\n"
+        f"⭐ XP: {xp} (до следующего: {100 - progress})\n"
+        f"📊 Прогресс: [{bar}] {progress}%\n\n"
+        f"📚 Статистика:\n"
+        f"• Всего дедлайнов: {total}\n"
+        f"• Активных: {active}\n"
+        f"• Выполнено: {done}\n\n"
+        f"💡 Добавляй и выполняй дедлайны, чтобы повышать уровень!"
+    )
+    await message.answer(text)
 
 @dp.message(Command('rating'))
 async def cmd_rating(message: types.Message):
@@ -224,67 +234,114 @@ async def cmd_rating(message: types.Message):
     if not pool:
         await message.answer("⚠️ База данных недоступна.")
         return
-    
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT username, full_name, xp, level, completed_deadlines FROM user_stats ORDER BY xp DESC LIMIT 10"
+            "SELECT chat_id, COUNT(*) as total, SUM(CASE WHEN is_done THEN 1 ELSE 0 END) as done "
+            "FROM deadlines GROUP BY chat_id ORDER BY done DESC LIMIT 10"
         )
-    
     if not rows:
-        await message.answer("📊 Рейтинг пока пуст. Будь первым!")
+        await message.answer("🏆 Рейтинг пока пуст. Будь первым!")
         return
-    
-    text = " ТОП-10 ПОЛЬЗОВАТЕЛЕЙ\n\n"
-    medals = ["🥇", "🥈", ""]
-    
+    medals = ["", "🥈", ""]
+    text = "🏆 ТОП-10 СТУДЕНТОВ\n\n"
     for i, row in enumerate(rows):
-        if i < 3:
-            medal = medals[i]
-        else:
-            medal = f"{i+1}."
-        
-        name = row['full_name'] or (row['username'] if row['username'] != "anon" else "Аноним")
-        text += f"{medal} <b>{name}</b>\n"
-        text += f"   ⭐ {row['xp']} XP | Уровень {row['level']} | ✅ {row['completed_deadlines']}\n\n"
-    
-    await message.answer(text, parse_mode="HTML")
+        prefix = medals[i] if i < 3 else f"  {i+1}."
+        text += f"{prefix} ID: {row['chat_id']} — выполнено: {row['done']} из {row['total']}\n"
+    await message.answer(text)
 
-@dp.message(Command('profile'))
-async def cmd_profile(message: types.Message):
+# --- АДМИН-КОМАНДЫ ---
+
+@dp.message(Command('admin'))
+async def cmd_admin(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён! Эта команда только для администратора.")
+        return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("⚠️ База данных недоступна")
         return
-    
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM user_stats WHERE chat_id = $1",
-            message.chat.id
-        )
-    
-    if not row:
-        await message.answer("📊 Твоя статистика пока пуста. Начни добавлять дедлайны!")
+        total_users = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM deadlines")
+        total_deadlines = await conn.fetchval("SELECT COUNT(*) FROM deadlines")
+        active = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE is_done = FALSE")
+    text = (
+        f"📊 АДМИН-ПАНЕЛЬ\n\n"
+        f"👥 Пользователей: {total_users}\n"
+        f"📋 Всего дедлайнов: {total_deadlines}\n"
+        f"⏳ Активных: {active}\n\n"
+        f"Команды:\n"
+        f"/users — список пользователей\n"
+        f"/logs — последние действия\n"
+        f"/broadcast <текст> — рассылка"
+    )
+    await message.answer(text)
+    await log_action(message.chat.id, "admin", "admin_panel")
+
+@dp.message(Command('users'))
+async def cmd_users(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
         return
-    
-    # Процент выполнения
-    completion_rate = 0
-    if row['total_deadlines'] > 0:
-        completion_rate = int((row['completed_deadlines'] / row['total_deadlines']) * 100)
-    
-    # Прогресс до следующего уровня
-    xp_for_next_level = row['level'] * 100
-    xp_progress = row['xp'] % 100
-    
-    text = f"👤 <b>ТВОЙ ПРОФИЛЬ</b>\n\n"
-    text += f"👤 Имя: {row['full_name'] or 'Аноним'}\n"
-    text += f"⭐ XP: {row['xp']}\n"
-    text += f" Уровень: {row['level']}\n"
-    text += f"📊 Прогресс: {xp_progress}/100 XP\n"
-    text += f" Всего дедлайнов: {row['total_deadlines']}\n"
-    text += f"✅ Выполнено: {row['completed_deadlines']}\n"
-    text += f" Процент выполнения: {completion_rate}%\n"
-    
-    await message.answer(text, parse_mode="HTML")
+    pool = await get_db_pool()
+    if not pool:
+        return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT chat_id, COUNT(*) as count FROM deadlines GROUP BY chat_id ORDER BY count DESC")
+    if not rows:
+        await message.answer("Пользователей пока нет")
+        return
+    text = f"👥 Пользователи ({len(rows)}):\n\n"
+    for row in rows:
+        text += f"• ID: {row['chat_id']} — {row['count']} дедлайнов\n"
+    await message.answer(text)
+
+@dp.message(Command('logs'))
+async def cmd_logs(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool:
+        return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_name, action, details, created_at FROM activity_logs ORDER BY created_at DESC LIMIT 15")
+    if not rows:
+        await message.answer("Логи пусты")
+        return
+    text = "📋 Последние действия:\n\n"
+    for row in rows:
+        time_str = row['created_at'].strftime("%d.%m %H:%M")
+        text += f"[{time_str}] {row['user_name'] or 'anon'}: {row['action']}"
+        if row['details']:
+            text += f" — {row['details']}"
+        text += "\n"
+    await message.answer(text)
+
+@dp.message(Command('broadcast'))
+async def cmd_broadcast(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    text_to_send = message.text.replace('/broadcast', '').strip()
+    if not text_to_send:
+        await message.answer("Формат: /broadcast <текст сообщения>")
+        return
+    pool = await get_db_pool()
+    if not pool:
+        return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT chat_id FROM deadlines")
+    sent, failed = 0, 0
+    for row in rows:
+        try:
+            await bot.send_message(row['chat_id'], f"📢 Объявление:\n\n{text_to_send}")
+            sent += 1
+        except:
+            failed += 1
+    await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
+    await log_action(message.chat.id, "admin", "broadcast", text_to_send[:30])
+
+# --- НАПОМИНАНИЯ ---
 
 async def send_reminders():
     pool = await get_db_pool()
@@ -296,9 +353,7 @@ async def send_reminders():
     day_after = today + timedelta(days=2)
     try:
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, chat_id, subject, deadline_date, last_reminder FROM deadlines WHERE is_done = FALSE"
-            )
+            rows = await conn.fetch("SELECT id, chat_id, subject, deadline_date, last_reminder FROM deadlines WHERE is_done = FALSE")
             for row in rows:
                 try:
                     deadline_date = datetime.strptime(row['deadline_date'], "%d.%m.%Y").date()
@@ -314,20 +369,17 @@ async def send_reminders():
                     reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == day_after:
                     reminder_type = "day_after"
-                    reminder_text = f" Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f"📅 Послезавтра дедлайн: {row['subject']} ({row['deadline_date']})"
                 if reminder_type and row['last_reminder'] != reminder_type:
                     try:
                         await bot.send_message(row['chat_id'], reminder_text)
-                        await conn.execute(
-                            "UPDATE deadlines SET last_reminder = $1 WHERE id = $2",
-                            reminder_type, row['id']
-                        )
+                        await conn.execute("UPDATE deadlines SET last_reminder = $1 WHERE id = $2", reminder_type, row['id'])
                     except Exception as e:
                         print(f"Ошибка отправки: {e}")
     except Exception as e:
         print(f"Ошибка проверки напоминаний: {e}")
 
-# Flask HTTP-сервер
+# --- Flask HTTP-сервер ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -343,7 +395,7 @@ async def main():
         await init_db()
     except Exception as e:
         print(f"⚠️ Ошибка init_db: {e}")
-    print("🚀 Запускаю Telegram-бота...")
+    print(" Запускаю Telegram-бота...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
