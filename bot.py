@@ -1009,7 +1009,6 @@ async def btn_add(message: types.Message):
         "🎁 +10 XP за каждый дедлайн!",
         parse_mode="HTML"
     )
-    )
 
 
 @dp.message(F.text == BTN_LIST)
