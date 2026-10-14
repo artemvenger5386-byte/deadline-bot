@@ -228,6 +228,7 @@ async def init_db():
                     "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS last_reminder TEXT",
                     "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                     "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS description TEXT",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS deadline_time TEXT",
                     "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT",
                     "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT",
                     "ALTER TABLE users ADD COLUMN IF NOT EXISTS group_number TEXT",
@@ -806,21 +807,21 @@ async def cmd_help(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-@dp.message(Command('add'))
+@@dp.message(Command('add'))
 async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
-            "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [описание]\n\n"
-            "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10 из учебника</code>\n\n"
-            "Описание необязательно, но полезно!",
+            "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [ЧЧ:ММ] [описание]\n\n"
+            "Пример: <code>/add Математика 15.10.2026 14:30 Решить задачи 1-10</code>\n\n"
+            "Время необязательно (по умолчанию 23:59)",
             parse_mode="HTML"
         )
         return
 
-    # Ищем дату в формате ДД.ММ.ГГГГ
+    # Ищем дату ДД.ММ.ГГГГ
     date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', args[1])
     if not date_match:
         await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
@@ -828,10 +829,18 @@ async def cmd_add(message: types.Message):
 
     date_str = date_match.group(1)
     date_pos = date_match.start()
+    after_date = args[1][date_pos + 10:].strip()  # Всё после даты
     
-    # Всё до даты — предмет, всё после — описание
+    # Ищем время ЧЧ:ММ
+    time_match = re.match(r'(\d{2}:\d{2})', after_date)
+    if time_match:
+        time_str = time_match.group(1)
+        description = after_date[time_match.end():].strip()
+    else:
+        time_str = "23:59"  # По умолчанию конец дня
+        description = after_date
+
     subject = args[1][:date_pos].strip()
-    description = args[1][date_pos + 10:].strip()  # 10 = длина "ДД.ММ.ГГГГ"
 
     if not subject:
         await message.answer("❌ Не указано название предмета.")
@@ -849,7 +858,7 @@ async def cmd_add(message: types.Message):
         await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
     if deadline < today_date():
-        await message.answer(" Эта дата уже прошла. Укажи сегодняшнюю или будущую дату.")
+        await message.answer("❌ Эта дата уже прошла. Укажи сегодняшнюю или будущую дату.")
         return
 
     pool = await get_db_pool()
@@ -859,18 +868,19 @@ async def cmd_add(message: types.Message):
     try:
         async with pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO deadlines (chat_id, subject, deadline_date, description) VALUES ($1, $2, $3, $4)",
-                message.chat.id, subject, date_str, description
+                "INSERT INTO deadlines (chat_id, subject, deadline_date, deadline_time, description) VALUES ($1, $2, $3, $4, $5)",
+                message.chat.id, subject, date_str, time_str, description
             )
         new_level = await add_xp(message.chat.id, XP_ADD_DEADLINE)
 
         desc_text = f"\n📝 {esc(description)}" if description else ""
+        time_text = f" в {time_str}" if time_str != "23:59" else ""
         await message.answer(
-            f"✅ <b>Дедлайн добавлен!</b>\n\n📚 {esc(subject)}\n📅 {date_str}{desc_text}"
+            f"✅ <b>Дедлайн добавлен!</b>\n\n {esc(subject)}\n📅 {date_str}{time_text}{desc_text}"
             f"{xp_message(XP_ADD_DEADLINE, new_level)}",
             parse_mode="HTML"
         )
-        await log_action(message.chat.id, message.from_user.username or "anon", "add", f"{subject} {date_str}")
+        await log_action(message.chat.id, message.from_user.username or "anon", "add", f"{subject} {date_str} {time_str}")
     except Exception as e:
         print(f"Ошибка add: {e}")
         await message.answer("❌ Ошибка при добавлении дедлайна")
@@ -1457,12 +1467,12 @@ async def send_reminders(chat_id: int = None) -> int:
         async with pool.acquire() as conn:
             if chat_id is None:
                 rows = await conn.fetch(
-                    "SELECT id, chat_id, subject, deadline_date, last_reminder, description "
+                    "SELECT id, chat_id, subject, deadline_date, last_reminder, description, deadline_time "
                     "FROM deadlines WHERE is_done = FALSE"
                 )
             else:
                 rows = await conn.fetch(
-                    "SELECT id, chat_id, subject, deadline_date, last_reminder, description "
+                    "SELECT id, chat_id, subject, deadline_date, last_reminder, description, deadline_time "
                     "FROM deadlines WHERE is_done = FALSE AND chat_id = $1",
                     chat_id
                 )
@@ -1477,13 +1487,13 @@ async def send_reminders(chat_id: int = None) -> int:
             reminder_text = None
             if deadline_date == today:
                 reminder_type = "today"
-                reminder_text = f"🔔 <b>СЕГОДНЯ дедлайн:</b> {subject} ({row['deadline_date']}){description}"
+                reminder_text = f"🔔 <b>СЕГОДНЯ дедлайн:</b> {subject} ({row['deadline_date']}{time_text}){description}"
             elif deadline_date == tomorrow:
                 reminder_type = "tomorrow"
-                reminder_text = f"⏰ <b>ЗАВТРА дедлайн:</b> {subject} ({row['deadline_date']}){description}"
+                reminder_text = f"⏰ <b>ЗАВТРА дедлайн:</b> {subject} ({row['deadline_date']}{time_text}){description}"
             elif deadline_date == day_after:
                 reminder_type = "day_after"
-                reminder_text = f"📅 <b>Послезавтра дедлайн:</b> {subject} ({row['deadline_date']}){description}"
+                reminder_text = f"📅 <b>Послезавтра дедлайн:</b> {subject} ({row['deadline_date']}{time_text}){description}"
             if reminder_type and row['last_reminder'] != reminder_type:
                 try:
                     await bot.send_message(row['chat_id'], reminder_text, parse_mode="HTML")
