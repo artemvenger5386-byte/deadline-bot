@@ -744,8 +744,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await ensure_user(message.chat.id, message.from_user.username or "anon", message.from_user.first_name)
 
-    kb = get_admin_keyboard() if is_admin(message.chat.id) else get_main_keyboard()
-
     if is_admin(message.chat.id) or await is_registered(message.chat.id):
         user_info = await get_user_info(message.chat.id)
         if user_info:
@@ -755,15 +753,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
         text = (
             f"╔══════════════════════════╗\n"
             f"   🎉 Привет, {display_name}!\n"
-            f"╚══════════════════════════╝\n\n"
-            f"Я <b>DeadLine Bot</b> — твой личный помощник в учёбе 🎓\n\n"
+            f"══════════════════════════╝\n\n"
+            f"Я <b>DeadLine Bot</b> — твой личный помощник в учёбе \n\n"
             f"✨ <b>Что я умею:</b>\n"
             f"• Управлять дедлайнами одной командой\n"
             f"• Напоминать о сроках автоматически\n"
             f"• Считать твой рейтинг и уровень\n"
             f"• Показывать топ студентов группы\n\n"
             f"🎁 <b>Бонус:</b> получай XP за каждое действие и повышай уровень!\n\n"
-            f"👇 Выбери действие в меню ниже:"
+            f" Выбери действие в меню ниже:"
         )
     else:
         text = (
@@ -776,7 +774,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
             f"После регистрации станут доступны все функции.\n\n"
             f"Используй /help, чтобы узнать команды."
         )
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    # ВСЕГДА показываем обычное меню
+    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
     await log_action(message.chat.id, message.from_user.username or "anon", "start")
 
 
