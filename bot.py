@@ -1,6 +1,7 @@
 import asyncio
 import html
 import os
+import re
 import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -45,6 +46,59 @@ def today_date():
 
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
+
+
+# --- ГРУППЫ ВИДА МО250, ГМУ230, ЭО240 ---
+# Формат: буквы направления + 2 цифры года поступления (25 -> 2025) + номер группы/потока
+
+# Латинские буквы, похожие на русские, приводим к кириллице (MO250 -> МО250)
+LATIN_TO_CYR = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
+
+# Расшифровка направлений (дополняй под свой вуз)
+GROUP_TYPES = {
+    "МО": "Менеджмент организации",
+}
+
+GROUP_RE = re.compile(r"^([А-ЯЁ]{1,6})(\d{2})(\d{0,2})$")
+
+
+def parse_group(raw: str):
+    """'мо 250' / 'MO-250' -> ('МО250', 'МО', 2025, '0'), либо None."""
+    value = re.sub(r"[\s\-_]", "", raw.upper()).translate(LATIN_TO_CYR)
+    m = GROUP_RE.match(value)
+    if not m:
+        return None
+    prefix, yy, num = m.groups()
+    return value, prefix, 2000 + int(yy), num
+
+
+def describe_group(group_number) -> str:
+    """МО250 -> 'МО250 (Менеджмент организации, набор 2025, 2 курс)'."""
+    if not group_number:
+        return "Не указана"
+    parsed = parse_group(group_number)
+    if not parsed:
+        return esc(group_number)
+    value, prefix, year, _ = parsed
+    now = datetime.now(TZ)
+    course = now.year - year + (1 if now.month >= 9 else 0)
+    parts = []
+    if prefix in GROUP_TYPES:
+        parts.append(GROUP_TYPES[prefix])
+    parts.append(f"набор {year}")
+    if 1 <= course <= 6:
+        parts.append(f"{course} курс")
+    return f"{esc(value)} ({', '.join(parts)})"
+
+
+def address_name(full_name, fallback: str = "") -> str:
+    """'Венгер Артём Владимирович' -> 'Артём Владимирович' (без HTML-экранирования)."""
+    parts = (full_name or "").split()
+    if len(parts) >= 3:
+        return f"{parts[1]} {parts[2]}"
+    if len(parts) == 2:
+        return parts[1]
+    return fallback or (full_name or "")
 
 
 TITLES = {1: "🌱 Новичок", 2: "📚 Студент", 3: "🎓 Отличник", 4: "🏆 Магистр", 5: "👑 Легенда"}
@@ -125,6 +179,13 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+                # старая таблица могла быть создана с group_number INTEGER — приводим к TEXT
+                try:
+                    await conn.execute(
+                        "ALTER TABLE users ALTER COLUMN group_number TYPE TEXT USING group_number::TEXT"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Миграция group_number: {e!r}")
                 print("✅ Все таблицы готовы")
                 return
         except Exception as e:
@@ -279,6 +340,10 @@ def get_admin_keyboard():
 # --- ПРОВЕРКА РЕГИСТРАЦИИ ---
 
 async def check_registered(message: types.Message) -> bool:
+    if is_admin(message.chat.id):
+        # админ работает без регистрации
+        await ensure_user(message.chat.id, message.from_user.username or "anon", message.from_user.first_name)
+        return True
     if not await is_registered(message.chat.id):
         await message.answer(
             "⚠️ <b>Сначала зарегистрируйся!</b>\n\n"
@@ -327,7 +392,8 @@ async def process_name(message: types.Message, state: FSMContext):
     await message.answer(
         f"✅ ФИО сохранено: <b>{esc(full_name)}</b>\n\n"
         "Теперь введи номер группы:\n"
-        "Пример: <code>201</code> или <code>ИС-21</code>",
+        "Пример: <code>МО250</code>, <code>ГМУ230</code>, <code>ЭО240</code>\n"
+        "(буквы направления + год поступления + номер)",
         parse_mode="HTML"
     )
     await state.set_state(RegisterStates.waiting_for_group)
@@ -341,9 +407,16 @@ async def process_group(message: types.Message, state: FSMContext):
     if group_number.startswith("/"):
         await message.answer("Введи номер группы текстом или отправь /cancel для отмены.")
         return
-    if len(group_number) < 1 or len(group_number) > 30:
-        await message.answer("❌ Номер группы должен быть длиной от 1 до 30 символов. Попробуй ещё раз.")
+    parsed = parse_group(group_number)
+    if not parsed or not (2015 <= parsed[2] <= today_date().year):
+        await message.answer(
+            "❌ Не понял номер группы.\n\n"
+            "Формат: буквы направления + год поступления (2 цифры) + номер.\n"
+            "Примеры: <code>МО250</code>, <code>ГМУ230</code>, <code>ЭО240</code>",
+            parse_mode="HTML"
+        )
         return
+    group_number = parsed[0]  # нормализованный вид: заглавные русские буквы без пробелов
     if not full_name:
         await state.clear()
         await message.answer("⚠️ Что-то пошло не так. Начни заново: /register")
@@ -359,15 +432,15 @@ async def process_group(message: types.Message, state: FSMContext):
                 full_name, group_number, message.chat.id
             )
     except Exception as e:
-        print(f"Ошибка регистрации: {e}")
+        print(f"Ошибка регистрации: {e!r}")
         await message.answer("❌ Не удалось сохранить данные. Попробуй ещё раз.")
         return
     await state.clear()
     await log_action(message.chat.id, full_name, "register", f"Группа: {group_number}")
     await message.answer(
-        f"✅ <b>Регистрация завершена!</b>\n\n"
+        f"✅ <b>Регистрация завершена, {esc(address_name(full_name))}!</b>\n\n"
         f"👤 ФИО: {esc(full_name)}\n"
-        f"🎓 Группа: {esc(group_number)}\n\n"
+        f"🎓 Группа: {describe_group(group_number)}\n\n"
         f"Теперь тебе доступны все команды!\n"
         f"Используй /help для просмотра списка.",
         reply_markup=get_main_keyboard(),
@@ -391,10 +464,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await ensure_user(message.chat.id, message.from_user.username or "anon", message.from_user.first_name)
 
-    if await is_registered(message.chat.id):
+    if is_admin(message.chat.id) or await is_registered(message.chat.id):
         user_info = await get_user_info(message.chat.id)
         if user_info:
-            display_name = format_user_name(user_info['full_name'], user_info['username'])
+            display_name = esc(address_name(user_info['full_name'], message.from_user.first_name))
         else:
             display_name = esc(message.from_user.first_name)
         text = (
@@ -643,7 +716,7 @@ async def cmd_profile(message: types.Message):
         xp = row['xp'] if row else 0
         level = row['level'] if row else 1
         display_name = format_user_name(row['full_name'] if row else None, row['username'] if row else None)
-        group_number = esc(row['group_number']) if row and row['group_number'] else 'Не указана'
+        group_number = describe_group(row['group_number'] if row else None)
         progress = xp % 100
         bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
         text = (
