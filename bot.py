@@ -1,6 +1,5 @@
 import asyncio
 import os
-import threading
 import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -8,7 +7,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
-from flask import Flask
+from aiohttp import web
 
 load_dotenv()
 
@@ -41,7 +40,6 @@ async def init_db():
     pool = await get_db_pool()
     if pool:
         async with pool.acquire() as conn:
-            # Таблица пользователей
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -52,7 +50,6 @@ async def init_db():
                     registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Таблица дедлайнов
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS deadlines (
                     id SERIAL PRIMARY KEY,
@@ -64,7 +61,6 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Таблица логов
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS activity_logs (
                     id SERIAL PRIMARY KEY,
@@ -134,7 +130,7 @@ async def cmd_help(message: types.Message):
         )
     else:
         text = (
-            "📖 Команды:\n"
+            " Команды:\n"
             "/start — начать\n"
             "/help — справка\n"
             "/register — регистрация (обязательно!)\n\n"
@@ -209,7 +205,6 @@ async def process_group(message: types.Message, state: FSMContext):
         f"Используй /help для просмотра списка."
     )
 
-# Проверка регистрации для всех команд
 async def check_registration(message: types.Message) -> bool:
     if not await is_user_registered(message.chat.id):
         await message.answer("⚠️ Сначала зарегистрируйся командой /register")
@@ -246,7 +241,7 @@ async def cmd_list(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 ORDER BY deadline_date", message.chat.id)
@@ -336,7 +331,7 @@ async def send_reminders():
                 reminder_text = None
                 if deadline_date == today:
                     reminder_type = "today"
-                    reminder_text = f" СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
+                    reminder_text = f"🔔 СЕГОДНЯ дедлайн: {row['subject']} ({row['deadline_date']})"
                 elif deadline_date == tomorrow:
                     reminder_type = "tomorrow"
                     reminder_text = f"⏰ ЗАВТРА дедлайн: {row['subject']} ({row['deadline_date']})"
@@ -372,7 +367,7 @@ async def cmd_admin(message: types.Message):
 @dp.message(Command('users'))
 async def cmd_users(message: types.Message):
     if not is_admin(message.chat.id):
-        await message.answer("⛔ Доступ запрещён!")
+        await message.answer(" Доступ запрещён!")
         return
     pool = await get_db_pool()
     if not pool: return
@@ -428,27 +423,37 @@ async def cmd_broadcast(message: types.Message):
             failed += 1
     await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
 
-# Flask HTTP-сервер
-app = Flask(__name__)
+# --- HTTP-СЕРВЕР (aiohttp) ---
+async def handle(request):
+    try:
+        await send_reminders()
+    except Exception as e:
+        print(f"Ошибка проверки напоминаний: {e}")
+    return web.Response(text="Bot is running! Reminders checked.")
 
-@app.route('/')
-def home():
-    return "Bot is running! Reminders checked."
-
-def run_flask():
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 HTTP server started on port {port}")
 
 async def main():
     try:
         await init_db()
     except Exception as e:
         print(f"⚠️ Ошибка init_db: {e}")
+    
+    # Запускаем HTTP-сервер в фоне
+    asyncio.create_task(start_http_server())
+    # Ждём 2 секунды, чтобы сервер успел открыть порт
+    await asyncio.sleep(2)
+    
     print("🚀 Запускаю Telegram-бота...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print("🌐 HTTP-сервер запущен")
     asyncio.run(main())
