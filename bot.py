@@ -1003,10 +1003,12 @@ async def btn_add(message: types.Message):
         return
     await message.answer(
         "➕ <b>Добавить дедлайн</b>\n\n"
-        "Формат: <code>/add Предмет ДД.ММ.ГГГГ</code>\n\n"
-        "Пример: <code>/add Математика 15.10.2026</code>\n\n"
+        "Формат: <code>/add Предмет ДД.ММ.ГГГГ [описание]</code>\n\n"
+        "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10</code>\n\n"
+        "Описание необязательно, но полезно!\n\n"
         "🎁 +10 XP за каждый дедлайн!",
         parse_mode="HTML"
+    )
     )
 
 
