@@ -811,7 +811,7 @@ async def cmd_help(message: types.Message):
 async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
-    args = message.text.split(maxsplit=1)
+        args = message.text.split(maxsplit=1)
         if len(args) < 2:
         await message.answer(
             "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [ЧЧ:ММ] [описание]\n\n"
