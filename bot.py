@@ -812,11 +812,12 @@ async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
     args = message.text.split(maxsplit=1)
-    if len(args) < 2:
+        if len(args) < 2:
         await message.answer(
             "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [ЧЧ:ММ] [описание]\n\n"
             "Пример: <code>/add Математика 15.10.2026 14:30 Решить задачи 1-10</code>\n\n"
-            "Время необязательно (по умолчанию 23:59)",
+            "Время необязательно (по умолчанию 23:59)\n"
+            "Описание необязательно, но полезно!",
             parse_mode="HTML"
         )
         return
@@ -1288,8 +1289,9 @@ async def btn_add(message: types.Message):
         return
     await message.answer(
         "➕ <b>Добавить дедлайн</b>\n\n"
-        "Формат: <code>/add Предмет ДД.ММ.ГГГГ [описание]</code>\n\n"
-        "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10</code>\n\n"
+        "Формат: <code>/add Предмет ДД.ММ.ГГГГ [ЧЧ:ММ] [описание]</code>\n\n"
+        "Пример: <code>/add Математика 15.10.2026 14:30 Решить задачи 1-10</code>\n\n"
+        "Время необязательно (по умолчанию 23:59)\n"
         "Описание необязательно, но полезно!\n\n"
         f"🎁 +{XP_ADD_DEADLINE} XP за каждый дедлайн!",
         parse_mode="HTML"
