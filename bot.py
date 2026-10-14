@@ -810,8 +810,8 @@ async def cmd_help(message: types.Message):
 async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         await message.answer(
             "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [описание]\n\n"
             "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10 из учебника</code>\n\n"
@@ -820,11 +820,22 @@ async def cmd_add(message: types.Message):
         )
         return
 
-    parts = args[2].split()
-    date_str = parts[0]
-    description = " ".join(parts[1:]) if len(parts) > 1 else ""
+    # Ищем дату в формате ДД.ММ.ГГГГ
+    date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', args[1])
+    if not date_match:
+        await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
+        return
 
-    subject = args[1]
+    date_str = date_match.group(1)
+    date_pos = date_match.start()
+    
+    # Всё до даты — предмет, всё после — описание
+    subject = args[1][:date_pos].strip()
+    description = args[1][date_pos + 10:].strip()  # 10 = длина "ДД.ММ.ГГГГ"
+
+    if not subject:
+        await message.answer("❌ Не указано название предмета.")
+        return
     if len(subject) > 100:
         await message.answer("❌ Название предмета слишком длинное (макс. 100 символов).")
         return
@@ -838,12 +849,12 @@ async def cmd_add(message: types.Message):
         await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
     if deadline < today_date():
-        await message.answer("❌ Эта дата уже прошла. Укажи сегодняшнюю или будущую дату.")
+        await message.answer(" Эта дата уже прошла. Укажи сегодняшнюю или будущую дату.")
         return
 
     pool = await get_db_pool()
     if not pool:
-        await message.answer("️ База данных недоступна.")
+        await message.answer("⚠️ База данных недоступна.")
         return
     try:
         async with pool.acquire() as conn:
