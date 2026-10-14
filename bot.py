@@ -754,7 +754,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         text = (
             f"╔══════════════════════════╗\n"
             f"   🎉 Привет, {display_name}!\n"
-            f"══════════════════════════╝\n\n"
+            f"╚══════════════════════════╝\n\n"
             f"Я <b>DeadLine Bot</b> — твой личный помощник в учёбе \n\n"
             f"✨ <b>Что я умею:</b>\n"
             f"• Управлять дедлайнами одной командой\n"
@@ -807,7 +807,7 @@ async def cmd_help(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-@@dp.message(Command('add'))
+@dp.message(Command('add'))
 async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
@@ -1484,6 +1484,8 @@ async def send_reminders(chat_id: int = None) -> int:
             except ValueError:
                 continue
             subject = esc(row['subject'])
+            time_str = row.get('deadline_time', '23:59')
+            time_text = f" в {time_str}" if time_str != "23:59" else ""
             description = f"\n📝 {esc(row['description'])}" if row.get('description') else ""
             reminder_type = None
             reminder_text = None
