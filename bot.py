@@ -27,7 +27,6 @@ XP_ADD_DEADLINE = 5    # за добавление дедлайна
 XP_DONE_DEADLINE = 15  # за выполнение дедлайна
 
 # Шкала уровней: сколько XP нужно для уровня 1, 2, 3, 4, 5.
-# Чтобы добавить уровень, допиши число в конец списка (и название в TITLES).
 LEVEL_THRESHOLDS = [0, 100, 300, 600, 1000]
 
 bot = Bot(token=os.getenv('BOT_TOKEN'))
@@ -42,6 +41,9 @@ class RegisterStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
+    waiting_for_givexp_id = State()
+    waiting_for_givexp_amount = State()
+    waiting_for_userdeadlines_id = State()
 
 
 def esc(value) -> str:
@@ -58,12 +60,8 @@ def is_admin(user_id: int) -> bool:
 
 
 # --- ГРУППЫ ВИДА МО250, ГМУ230, ЭО240 ---
-# Формат: буквы направления + 2 цифры года поступления (25 -> 2025) + номер группы/потока
-
-# Латинские буквы, похожие на русские, приводим к кириллице (MO250 -> МО250)
 LATIN_TO_CYR = str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ")
 
-# Расшифровка направлений (дополняй под свой вуз)
 GROUP_TYPES = {
     "МО": "Менеджмент организации",
 }
@@ -114,7 +112,7 @@ TITLES = {1: "🌱 Новичок", 2: "📚 Студент", 3: "🎓 Отли�
 
 
 def get_title(level: int) -> str:
-    return TITLES.get(level, "⚡ Бог продуктивности") if level <= 5 else "⚡ Бог продуктивности"
+    return TITLES.get(level, "⚡ Бог продуктивности") if level <= 5 else " Бог продуктивности"
 
 
 def level_for_xp(xp: int) -> int:
@@ -180,7 +178,7 @@ async def get_db_pool():
                 os.getenv('DATABASE_URL'),
                 min_size=2,
                 max_size=5,
-                statement_cache_size=0,  # нужно для pgbouncer/Supabase pooler
+                statement_cache_size=0,
             )
             print("✅ Подключено к Supabase")
         except Exception as e:
@@ -229,8 +227,6 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
-                # CREATE TABLE IF NOT EXISTS не меняет уже существующие таблицы,
-                # поэтому дозаводим недостающие колонки старых версий таблиц
                 migrations = [
                     "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS chat_id BIGINT",
                     "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS subject TEXT",
@@ -256,7 +252,6 @@ async def init_db():
                     "UPDATE users SET level = 1 WHERE level IS NULL",
                     "UPDATE users SET is_registered = FALSE WHERE is_registered IS NULL",
                     "UPDATE deadlines SET is_done = FALSE WHERE is_done IS NULL",
-                    # пересчёт уровней по новой шкале (идемпотентно)
                     f"UPDATE users SET level = {level_sql_case()}",
                 ]
                 for sql in migrations:
@@ -377,12 +372,16 @@ BTN_DONE = "✅ Выполнить"
 BTN_DELETE = "🗑 Удалить"
 BTN_PROFILE = "👤 Профиль"
 BTN_RATING = "🏆 Рейтинг"
+BTN_LEVELS = "🏅 Звания и уровни"
 BTN_CHECK = "🔍 Проверить напоминания"
 BTN_HELP = "📖 Справка"
 BTN_STATS = "📊 Статистика"
 BTN_USERS = "👥 Пользователи"
 BTN_LOGS = "📋 Логи"
 BTN_BROADCAST = "📢 Рассылка"
+BTN_ANALYTICS = " Аналитика"
+BTN_GIVEXP = "💰 Начислить XP"
+BTN_USERDEADLINES = "📋 Дедлайны юзера"
 BTN_BACK = "◀️ Главное меню"
 
 
@@ -393,6 +392,7 @@ def get_main_keyboard():
             [KeyboardButton(text=BTN_LIST)],
             [KeyboardButton(text=BTN_DONE), KeyboardButton(text=BTN_DELETE)],
             [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_RATING)],
+            [KeyboardButton(text=BTN_LEVELS)],
             [KeyboardButton(text=BTN_CHECK)],
             [KeyboardButton(text=BTN_HELP)],
         ],
@@ -404,10 +404,10 @@ def get_main_keyboard():
 def get_admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_STATS)],
-            [KeyboardButton(text=BTN_USERS)],
-            [KeyboardButton(text=BTN_LOGS)],
+            [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_ANALYTICS)],
+            [KeyboardButton(text=BTN_USERS), KeyboardButton(text=BTN_LOGS)],
             [KeyboardButton(text=BTN_BROADCAST)],
+            [KeyboardButton(text=BTN_GIVEXP), KeyboardButton(text=BTN_USERDEADLINES)],
             [KeyboardButton(text=BTN_BACK)],
         ],
         resize_keyboard=True,
@@ -419,12 +419,11 @@ def get_admin_keyboard():
 
 async def check_registered(message: types.Message) -> bool:
     if is_admin(message.chat.id):
-        # админ работает без регистрации
         await ensure_user(message.chat.id, message.from_user.username or "anon", message.from_user.first_name)
         return True
     if not await is_registered(message.chat.id):
         await message.answer(
-            "⚠️ <b>Сначала зарегистрируйся!</b>\n\n"
+            "️ <b>Сначала зарегистрируйся!</b>\n\n"
             "Используй команду /register, чтобы ввести ФИО и номер группы.\n"
             "После регистрации станут доступны все функции.",
             parse_mode="HTML"
@@ -433,7 +432,7 @@ async def check_registered(message: types.Message) -> bool:
     return True
 
 
-# --- РЕГИСТРАЦИЯ И FSM (регистрируем ПЕРВЫМИ, чтобы состояния имели приоритет) ---
+# --- РЕГИСТРАЦИЯ И FSM ---
 
 @dp.message(Command('cancel'))
 async def cmd_cancel(message: types.Message, state: FSMContext):
@@ -448,7 +447,7 @@ async def cmd_register(message: types.Message, state: FSMContext):
         return
     await ensure_user(message.chat.id, message.from_user.username or "anon", message.from_user.first_name)
     await message.answer(
-        "📝 <b>Регистрация</b>\n\n"
+        " <b>Регистрация</b>\n\n"
         "Введи своё ФИО:\n"
         "Пример: <code>Иванов Иван Иванович</code>\n\n"
         "Отмена: /cancel",
@@ -494,7 +493,7 @@ async def process_group(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         return
-    group_number = parsed[0]  # нормализованный вид: заглавные русские буквы без пробелов
+    group_number = parsed[0]
     if not full_name:
         await state.clear()
         await message.answer("⚠️ Что-то пошло не так. Начни заново: /register")
@@ -526,6 +525,57 @@ async def process_group(message: types.Message, state: FSMContext):
     )
 
 
+# --- ЗВАНИЯ И УРОВНИ (для всех) ---
+
+@dp.message(Command('levels'))
+@dp.message(F.text == BTN_LEVELS)
+async def cmd_levels(message: types.Message):
+    pool = await get_db_pool()
+    user_xp = 0
+    user_level = 1
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT xp FROM users WHERE chat_id = $1", message.chat.id)
+                if row:
+                    user_xp = row['xp']
+                    user_level = level_for_xp(user_xp)
+        except Exception:
+            pass
+
+    text = (
+        "╔══════════════════════════╗\n"
+        "        🏅 <b>ЗВАНИЯ И УРОВНИ</b>\n"
+        "╚══════════════════════════╝\n\n"
+        "Выполняй дедлайны, получай XP и повышай свой статус!\n\n"
+        f"{levels_scale_text()}\n\n"
+    )
+    
+    if await is_registered(message.chat.id) or user_xp > 0:
+        progress, to_next = level_progress(user_xp)
+        bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+        to_next_text = f"Осталось {to_next} XP до следующего уровня!" if to_next else "Ты достиг максимального уровня! 🎉"
+        
+        text += (
+            "──────────────────────\n"
+            f"👤 <b>Твой текущий прогресс:</b>\n"
+            f"⭐ XP: {user_xp} | Уровень: {user_level} ({get_title(user_level)})\n"
+            f"📊 [{bar}] {progress}%\n"
+            f"💡 {to_next_text}\n\n"
+        )
+    
+    text += (
+        "💰 <b>Как получить XP:</b>\n"
+        f"• Добавить дедлайн: +{XP_ADD_DEADLINE} XP\n"
+        f"• Выполнить дедлайн: +{XP_DONE_DEADLINE} XP\n\n"
+        "💡 <i>Совет: регулярное выполнение задач — ключ к званию Легенды!</i>"
+    )
+    
+    await message.answer(text, parse_mode="HTML")
+
+
+# --- АДМИН: FSM для команд с параметрами ---
+
 @dp.message(AdminStates.waiting_for_broadcast, F.text)
 async def process_broadcast(message: types.Message, state: FSMContext):
     if not is_admin(message.chat.id):
@@ -533,6 +583,110 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         return
     await state.clear()
     await do_broadcast(message, message.text.strip())
+
+
+@dp.message(AdminStates.waiting_for_givexp_id, F.text)
+async def process_givexp_id(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await state.clear()
+        return
+    if message.text.strip().startswith("/"):
+        await message.answer("Введи ID пользователя числом или /cancel для отмены.")
+        return
+    try:
+        target_id = int(message.text.strip())
+        await state.update_data(target_id=target_id)
+        await message.answer("Теперь введи количество XP для начисления:\nПример: <code>50</code>", parse_mode="HTML")
+        await state.set_state(AdminStates.waiting_for_givexp_amount)
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуй ещё раз или /cancel для отмены.")
+
+
+@dp.message(AdminStates.waiting_for_givexp_amount, F.text)
+async def process_givexp_amount(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await state.clear()
+        return
+    if message.text.strip().startswith("/"):
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
+        return
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        target_id = data['target_id']
+        await state.clear()
+        
+        new_level = await add_xp(target_id, amount)
+        if new_level:
+            await message.answer(
+                f"✅ Начислено {amount} XP пользователю {target_id}.\n"
+                f"🎉 Он получил новый уровень: {new_level} ({get_title(new_level)})!",
+                reply_markup=get_admin_keyboard()
+            )
+        else:
+            await message.answer(
+                f"✅ Начислено {amount} XP пользователю {target_id}.\n"
+                f"Уровень не изменился.",
+                reply_markup=get_admin_keyboard()
+            )
+        await log_action(message.chat.id, "admin", "givexp", f"User: {target_id}, XP: {amount}")
+    except ValueError:
+        await message.answer(" Количество XP должно быть числом. Попробуй ещё раз или /cancel для отмены.")
+
+
+@dp.message(AdminStates.waiting_for_userdeadlines_id, F.text)
+async def process_userdeadlines_id(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await state.clear()
+        return
+    if message.text.strip().startswith("/"):
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
+        return
+    try:
+        target_id = int(message.text.strip())
+        await state.clear()
+        await show_user_deadlines(message, target_id)
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуй ещё раз или /cancel для отмены.")
+
+
+async def show_user_deadlines(message: types.Message, target_chat_id: int):
+    pool = await get_db_pool()
+    if not pool:
+        await message.answer("⚠️ База данных недоступна")
+        return
+    try:
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT full_name, username, group_number FROM users WHERE chat_id = $1", target_chat_id)
+            name = user['full_name'] or user['username'] or "Неизвестно" if user else "Неизвестно"
+            group = user['group_number'] if user else None
+            
+            rows = await conn.fetch(
+                "SELECT id, subject, deadline_date, is_done, description FROM deadlines WHERE chat_id = $1 ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY')",
+                target_chat_id
+            )
+        
+        if not rows:
+            await message.answer(
+                f"📭 У пользователя {esc(name)} (ID: {target_chat_id}) нет дедлайнов.",
+                reply_markup=get_admin_keyboard()
+            )
+            return
+        
+        group_text = f" (гр. {esc(group)})" if group else ""
+        text = f"📋 <b>Дедлайны пользователя:</b>\n{esc(name)}{group_text} (ID: {target_chat_id})\n\n"
+        for row in rows:
+            status = "✅" if row['is_done'] else ""
+            text += f"{status} #{row['id']} {esc(row['subject'])} ({row['deadline_date']})\n"
+            if row.get('description'):
+                text += f"   📝 {esc(row['description'])}\n"
+            text += "\n"
+        
+        await send_long(message, text, parse_mode="HTML")
+    except Exception as e:
+        await report_error(message, "просмотра дедлайнов юзера", e)
 
 
 # --- ОБЫЧНЫЕ КОМАНДЫ ---
@@ -550,7 +704,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             display_name = esc(message.from_user.first_name)
         text = (
             f"╔══════════════════════════╗\n"
-            f"   🎉 Привет, {display_name}!\n"
+            f"    Привет, {display_name}!\n"
             f"╚══════════════════════════╝\n\n"
             f"Я <b>DeadLine Bot</b> — твой личный помощник в учёбе 🎓\n\n"
             f"✨ <b>Что я умею:</b>\n"
@@ -595,7 +749,8 @@ async def cmd_help(message: types.Message):
         "• /check — проверить напоминания\n\n"
         "🏆 <b>Рейтинг и профиль:</b>\n"
         "• /profile — мой профиль и уровень\n"
-        "• /rating — топ-10 студентов\n\n"
+        "• /rating — топ-10 студентов\n"
+        "• /levels — звания и уровни\n\n"
         f"📈 <b>Уровни:</b>\n{levels_scale_text()}\n\n"
         "💡 <b>Совет:</b> выполняй дедлайны вовремя, чтобы получать больше XP!"
     )
@@ -606,7 +761,7 @@ async def cmd_help(message: types.Message):
 async def cmd_add(message: types.Message):
     if not await check_registered(message):
         return
-    args = message.text.split(maxsplit=2)  # разделяем максимум на 3 части
+    args = message.text.split(maxsplit=2)
     if len(args) < 3:
         await message.answer(
             "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [описание]\n\n"
@@ -616,7 +771,6 @@ async def cmd_add(message: types.Message):
         )
         return
 
-    # Парсим дату (первое слово после предмета) и описание (всё остальное)
     parts = args[2].split()
     date_str = parts[0]
     description = " ".join(parts[1:]) if len(parts) > 1 else ""
@@ -640,7 +794,7 @@ async def cmd_add(message: types.Message):
 
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     try:
         async with pool.acquire() as conn:
@@ -668,11 +822,10 @@ async def cmd_list(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     try:
         async with pool.acquire() as conn:
-            # deadline_date — TEXT формата ДД.ММ.ГГГГ, сортируем как дату
             rows = await conn.fetch(
                 "SELECT id, subject, deadline_date, is_done, description FROM deadlines WHERE chat_id = $1 "
                 "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY')",
@@ -687,7 +840,7 @@ async def cmd_list(message: types.Message):
         text = "╔══════════════════════════╗\n        📋 <b>ТВОИ ДЕДЛАЙНЫ</b>\n╚══════════════════════════╝\n\n"
         for row in rows:
             status = "✅" if row['is_done'] else "⏳"
-            text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {row['deadline_date']}\n"
+            text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n    {row['deadline_date']}\n"
             if row.get('description'):
                 text += f"   📝 {esc(row['description'])}\n"
             text += "\n"
@@ -713,11 +866,10 @@ async def cmd_done(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна.")
+        await message.answer("️ База данных недоступна.")
         return
     try:
         async with pool.acquire() as conn:
-            # is_done = FALSE — чтобы нельзя было фармить XP повторным /done
             result = await conn.execute(
                 "UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2 AND is_done = FALSE",
                 deadline_id, message.chat.id
@@ -781,7 +933,7 @@ async def cmd_check(message: types.Message):
     if not await check_registered(message):
         return
     await message.answer("🔍 <b>Проверяю дедлайны...</b>", parse_mode="HTML")
-    sent = await send_reminders(chat_id=message.chat.id)  # только для этого пользователя
+    sent = await send_reminders(chat_id=message.chat.id)
     if sent:
         await message.answer(f"✅ <b>Проверка завершена!</b> Напоминаний отправлено: {sent}", parse_mode="HTML")
     else:
@@ -879,10 +1031,10 @@ async def admin_stats(message: types.Message):
             total_deadlines = await conn.fetchval("SELECT COUNT(*) FROM deadlines")
             active = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE is_done = FALSE")
         text = (
-            f"📊 <b>Статистика:</b>\n\n"
+            f" <b>Статистика:</b>\n\n"
             f"👥 Зарегистрировано: <b>{total_users}</b> / {total_all}\n"
-            f"📋 Всего дедлайнов: <b>{total_deadlines}</b>\n"
-            f"⏳ Активных: <b>{active}</b>"
+            f" Всего дедлайнов: <b>{total_deadlines}</b>\n"
+            f" Активных: <b>{active}</b>"
         )
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
@@ -903,7 +1055,7 @@ async def admin_users(message: types.Message):
         if not rows:
             await message.answer("Пользователей пока нет")
             return
-        text = f"👥 <b>Пользователи ({len(rows)}):</b>\n\n"
+        text = f" <b>Пользователи ({len(rows)}):</b>\n\n"
         for row in rows:
             reg_status = "✅" if row['is_registered'] else "❌"
             display_name = format_user_name(row['full_name'], row['username'])
@@ -953,7 +1105,6 @@ async def do_broadcast(message: types.Message, text_to_send: str):
         return
     try:
         async with pool.acquire() as conn:
-            # рассылка всем зарегистрированным, а не только тем, у кого есть дедлайны
             rows = await conn.fetch("SELECT chat_id FROM users WHERE is_registered = TRUE")
         sent, failed = 0, 0
         for row in rows:
@@ -965,11 +1116,35 @@ async def do_broadcast(message: types.Message, text_to_send: str):
             except Exception as e:
                 print(f"Ошибка рассылки {row['chat_id']}: {e}")
                 failed += 1
-            await asyncio.sleep(0.05)  # лимиты Telegram (~30 сообщений/сек)
+            await asyncio.sleep(0.05)
         await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
         await log_action(message.chat.id, "admin", "broadcast", text_to_send[:30])
     except Exception as e:
         print(f"Ошибка broadcast: {e}")
+
+
+async def admin_analytics(message: types.Message):
+    pool = await get_db_pool()
+    if not pool:
+        return
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT subject, COUNT(*) as count FROM deadlines GROUP BY subject ORDER BY count DESC LIMIT 5"
+            )
+        if not rows:
+            await message.answer("📈 Пока недостаточно данных для аналитики.")
+            return
+        
+        text = "📈 <b>ТОП-5 самых популярных предметов:</b>\n\n"
+        for i, row in enumerate(rows):
+            medal = ["🥇", "🥈", "", "4️⃣", "5️⃣"][i]
+            text += f"{medal} <b>{esc(row['subject'])}</b> — {row['count']} дедлайн(ов)\n"
+        
+        text += "\n💡 <i>Эти данные помогают понять, по каким предметам у студентов наибольшая нагрузка.</i>"
+        await message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        await report_error(message, "аналитики", e)
 
 
 # --- АДМИН-КОМАНДЫ ---
@@ -979,7 +1154,7 @@ async def cmd_admin(message: types.Message):
     if not is_admin(message.chat.id):
         await message.answer("⛔ Доступ запрещён! Эта команда только для администратора.")
         return
-    await message.answer("🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\n👇 Выбери действие:",
+    await message.answer(" <b>АДМИН-ПАНЕЛЬ</b>\n\n👇 Выбери действие:",
                          reply_markup=get_admin_keyboard(), parse_mode="HTML")
     await admin_stats(message)
     await log_action(message.chat.id, "admin", "admin_panel")
@@ -1068,7 +1243,7 @@ async def btn_done(message: types.Message):
         "✅ <b>Отметить выполненным</b>\n\n"
         "Формат: <code>/done ID</code>\n\n"
         "Пример: <code>/done 5</code>\n\n"
-        f"🎁 +{XP_DONE_DEADLINE} XP за выполнение!",
+        f" +{XP_DONE_DEADLINE} XP за выполнение!",
         parse_mode="HTML"
     )
 
@@ -1093,6 +1268,11 @@ async def btn_profile(message: types.Message):
 @dp.message(F.text == BTN_RATING)
 async def btn_rating(message: types.Message):
     await cmd_rating(message)
+
+
+@dp.message(F.text == BTN_LEVELS)
+async def btn_levels(message: types.Message):
+    await cmd_levels(message)
 
 
 @dp.message(F.text == BTN_CHECK)
@@ -1148,6 +1328,44 @@ async def btn_admin_broadcast(message: types.Message, state: FSMContext):
     await message.answer(
         "📢 <b>Рассылка</b>\n\n"
         "Отправь следующим сообщением текст, который нужно разослать всем зарегистрированным.\n\n"
+        "Отмена: /cancel",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == BTN_ANALYTICS)
+async def btn_admin_analytics(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    await admin_analytics(message)
+
+
+@dp.message(F.text == BTN_GIVEXP)
+async def btn_admin_givexp(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    await state.set_state(AdminStates.waiting_for_givexp_id)
+    await message.answer(
+        "💰 <b>Начислить XP пользователю</b>\n\n"
+        "Введи ID пользователя (chat_id):\n"
+        "Пример: <code>123456789</code>\n\n"
+        "Отмена: /cancel",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == BTN_USERDEADLINES)
+async def btn_admin_userdeadlines(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await message.answer(" Доступ запрещён!")
+        return
+    await state.set_state(AdminStates.waiting_for_userdeadlines_id)
+    await message.answer(
+        " <b>Просмотр дедлайнов пользователя</b>\n\n"
+        "Введи ID пользователя (chat_id):\n"
+        "Пример: <code>123456789</code>\n\n"
         "Отмена: /cancel",
         parse_mode="HTML"
     )
@@ -1242,7 +1460,7 @@ async def main():
         await init_db()
     except Exception as e:
         print(f"⚠️ Ошибка init_db: {e}")
-    print("🚀 Запускаю Telegram-бота...")
+    print(" Запускаю Telegram-бота...")
     reminder_task = asyncio.create_task(reminder_loop())
     try:
         await dp.start_polling(bot)
