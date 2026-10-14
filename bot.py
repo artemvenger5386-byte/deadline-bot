@@ -205,20 +205,86 @@ async def send_reminders():
 @dp.message(Command('admin'))
 async def cmd_admin(message: types.Message):
     if not is_admin(message.chat.id):
-        await message.answer("⛔ Доступ запрещён! Эта команда только для администратора.")
+        await message.answer("Доступ запрещён! Эта команда только для администратора.")
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("⚠️ База данных недоступна")
+        await message.answer("База данных недоступна")
         return
     async with pool.acquire() as conn:
         total_users = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM deadlines")
         total_deadlines = await conn.fetchval("SELECT COUNT(*) FROM deadlines")
         active = await conn.fetchval("SELECT COUNT(*) FROM deadlines WHERE is_done = FALSE")
-    text = f"📊 <b>Админ-панель</b>\n\n👥 Пользователей: <b>{total_users}</b>\n📋 Всего дедлайнов: <b>{total_deadlines}</b>\n⏳ Активных: <b>{active}</b>\n\n<b>Команды:</b>\n/users — список пользователей\n/logs — последние действия\n/broadcast <текст> — рассылка"
-    await message.answer(text, parse_mode="HTML")
-    await log_action(message.chat.id, "admin", "admin_panel")
+    text = (
+        f"Админ-панель\n\n"
+        f"Пользователей: {total_users}\n"
+        f"Всего дедлайнов: {total_deadlines}\n"
+        f"Активных: {active}\n\n"
+        f"Команды:\n"
+        f"/users — список пользователей\n"
+        f"/logs — последние действия\n"
+        f"/broadcast <текст> — рассылка"
+    )
+    await message.answer(text)
 
+@dp.message(Command('users'))
+async def cmd_users(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT chat_id, COUNT(*) as count FROM deadlines GROUP BY chat_id ORDER BY count DESC")
+    if not rows:
+        await message.answer("Пользователей пока нет")
+        return
+    text = f"Пользователи ({len(rows)}):\n\n"
+    for row in rows:
+        text += f"• ID: {row['chat_id']} — {row['count']} дедлайнов\n"
+    await message.answer(text)
+
+@dp.message(Command('logs'))
+async def cmd_logs(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_name, action, details, created_at FROM activity_logs ORDER BY created_at DESC LIMIT 15")
+    if not rows:
+        await message.answer("Логи пусты")
+        return
+    text = "Последние действия:\n\n"
+    for row in rows:
+        time_str = row['created_at'].strftime("%d.%m %H:%M")
+        text += f"[{time_str}] {row['user_name'] or 'anon'}: {row['action']}"
+        if row['details']: text += f" — {row['details']}"
+        text += "\n"
+    await message.answer(text)
+
+@dp.message(Command('broadcast'))
+async def cmd_broadcast(message: types.Message):
+    if not is_admin(message.chat.id):
+        await message.answer("Доступ запрещён!")
+        return
+    text_to_send = message.text.replace('/broadcast', '').strip()
+    if not text_to_send:
+        await message.answer("Формат: /broadcast <текст сообщения>")
+        return
+    pool = await get_db_pool()
+    if not pool: return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT chat_id FROM deadlines")
+    sent, failed = 0, 0
+    for row in rows:
+        try:
+            await bot.send_message(row['chat_id'], f"Объявление:\n\n{text_to_send}")
+            sent += 1
+        except:
+            failed += 1
+    await message.answer(f"Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
 @dp.message(Command('users'))
 async def cmd_users(message: types.Message):
     if not is_admin(message.chat.id):
