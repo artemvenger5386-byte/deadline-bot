@@ -643,11 +643,11 @@ async def cmd_list(message: types.Message):
             return
         text = "╔══════════════════════════╗\n        📋 <b>ТВОИ ДЕДЛАЙНЫ</b>\n╚══════════════════════════╝\n\n"
         for row in rows:
-    status = "✅" if row['is_done'] else "⏳"
-    text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {row['deadline_date']}\n"
-    if row.get('description'):
-        text += f"    {esc(row['description'])}\n"
-    text += "\n"
+            status = "✅" if row['is_done'] else "⏳"
+            text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {row['deadline_date']}\n"
+            if row.get('description'):
+                text += f"    {esc(row['description'])}\n"
+            text += "\n"
         text += "💡 Используй /done &lt;ID&gt; или /delete &lt;ID&gt;"
         await send_long(message, text, parse_mode="HTML")
     except Exception as e:
@@ -1139,17 +1139,18 @@ async def send_reminders(chat_id: int = None) -> int:
             except ValueError:
                 continue
             subject = esc(row['subject'])
+            description = f"\n📝 {esc(row['description'])}" if row.get('description') else ""
             reminder_type = None
             reminder_text = None
             if deadline_date == today:
                 reminder_type = "today"
-                reminder_text = f"🔔 <b>СЕГОДНЯ дедлайн:</b> {subject} ({row['deadline_date']})"
+                reminder_text = f"🔔 <b>СЕГОДНЯ дедлайн:</b> {subject} ({row['deadline_date']}){description}"
             elif deadline_date == tomorrow:
                 reminder_type = "tomorrow"
-                reminder_text = f"⏰ <b>ЗАВТРА дедлайн:</b> {subject} ({row['deadline_date']})"
+                reminder_text = f"⏰ <b>ЗАВТРА дедлайн:</b> {subject} ({row['deadline_date']}){description}"
             elif deadline_date == day_after:
                 reminder_type = "day_after"
-                reminder_text = f"📅 <b>Послезавтра дедлайн:</b> {subject} ({row['deadline_date']})"
+                reminder_text = f"📅 <b>Послезавтра дедлайн:</b> {subject} ({row['deadline_date']}){description}"
             if reminder_type and row['last_reminder'] != reminder_type:
                 try:
                     await bot.send_message(row['chat_id'], reminder_text, parse_mode="HTML")
