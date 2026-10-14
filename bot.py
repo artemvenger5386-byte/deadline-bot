@@ -3,6 +3,7 @@ import html
 import os
 import re
 import threading
+import traceback
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -120,6 +121,16 @@ async def send_long(message: types.Message, text: str, **kwargs):
         await message.answer(chunk, **kwargs)
 
 
+async def report_error(message: types.Message, where: str, e: Exception):
+    """Пишет ошибку в консоль, а админу показывает её прямо в чате."""
+    print(f"Ошибка {where}: {e!r}")
+    traceback.print_exc()
+    if is_admin(message.chat.id):
+        await message.answer(
+            f"🛠 <b>Ошибка {where}:</b>\n<code>{esc(repr(e))[:500]}</code>", parse_mode="HTML"
+        )
+
+
 # --- БАЗА ДАННЫХ ---
 
 async def get_db_pool():
@@ -179,13 +190,38 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
-                # старая таблица могла быть создана с group_number INTEGER — приводим к TEXT
-                try:
-                    await conn.execute(
-                        "ALTER TABLE users ALTER COLUMN group_number TYPE TEXT USING group_number::TEXT"
-                    )
-                except Exception as e:
-                    print(f"⚠️ Миграция group_number: {e!r}")
+                # CREATE TABLE IF NOT EXISTS не меняет уже существующие таблицы,
+                # поэтому дозаводим недостающие колонки старых версий таблиц
+                migrations = [
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS subject TEXT",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS deadline_date TEXT",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS is_done BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS last_reminder TEXT",
+                    "ALTER TABLE deadlines ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS group_number TEXT",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_registered BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS xp INTEGER DEFAULT 0",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 1",
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                    "ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS user_name TEXT",
+                    "ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS action TEXT",
+                    "ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS details TEXT",
+                    "ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE users ALTER COLUMN group_number TYPE TEXT USING group_number::TEXT",
+                    "UPDATE users SET xp = 0 WHERE xp IS NULL",
+                    "UPDATE users SET level = 1 WHERE level IS NULL",
+                    "UPDATE users SET is_registered = FALSE WHERE is_registered IS NULL",
+                    "UPDATE deadlines SET is_done = FALSE WHERE is_done IS NULL",
+                ]
+                for sql in migrations:
+                    try:
+                        await conn.execute(sql)
+                    except Exception as e:
+                        print(f"⚠️ Миграция не выполнена ({sql}): {e!r}")
                 print("✅ Все таблицы готовы")
                 return
         except Exception as e:
@@ -598,7 +634,7 @@ async def cmd_list(message: types.Message):
         text += "💡 Используй /done &lt;ID&gt; или /delete &lt;ID&gt;"
         await send_long(message, text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка list: {e}")
+        await report_error(message, "списка дедлайнов", e)
         await message.answer("❌ Не удалось получить список дедлайнов")
 
 
@@ -736,7 +772,7 @@ async def cmd_profile(message: types.Message):
         )
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка profile: {e}")
+        await report_error(message, "профиля", e)
         await message.answer("❌ Не удалось загрузить профиль")
 
 
@@ -764,7 +800,7 @@ async def cmd_rating(message: types.Message):
             text += f"{prefix} <b>{display_name}</b>{group}\n   ⭐ {row['xp']} XP • Уровень {row['level']}\n\n"
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка rating: {e}")
+        await report_error(message, "рейтинга", e)
         await message.answer("❌ Не удалось загрузить рейтинг")
 
 
@@ -789,7 +825,7 @@ async def admin_stats(message: types.Message):
         )
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка статистики: {e}")
+        await report_error(message, "статистики", e)
 
 
 async def admin_users(message: types.Message):
@@ -817,7 +853,7 @@ async def admin_users(message: types.Message):
             text += f" — {row['xp']} XP (ур. {row['level']})\n\n"
         await send_long(message, text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка пользователей: {e}")
+        await report_error(message, "списка пользователей", e)
 
 
 async def admin_logs(message: types.Message):
@@ -843,7 +879,7 @@ async def admin_logs(message: types.Message):
             text += "\n"
         await send_long(message, text, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка логов: {e}")
+        await report_error(message, "логов", e)
 
 
 async def do_broadcast(message: types.Message, text_to_send: str):
@@ -911,6 +947,35 @@ async def cmd_broadcast(message: types.Message):
         return
     text_to_send = message.text.replace('/broadcast', '', 1).strip()
     await do_broadcast(message, text_to_send)
+
+
+@dp.message(Command('dbcheck'))
+async def cmd_dbcheck(message: types.Message):
+    """Показывает реальные колонки таблиц в БД (для диагностики)."""
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    pool = await get_db_pool()
+    if not pool:
+        await message.answer("⚠️ База данных недоступна")
+        return
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name IN ('users', 'deadlines', 'activity_logs') "
+                "ORDER BY table_name, ordinal_position"
+            )
+        text = "🗄 <b>Структура БД:</b>\n"
+        current = None
+        for r in rows:
+            if r['table_name'] != current:
+                current = r['table_name']
+                text += f"\n<b>{current}</b>\n"
+            text += f"• {r['column_name']} — {r['data_type']}\n"
+        await send_long(message, text, parse_mode="HTML")
+    except Exception as e:
+        await report_error(message, "dbcheck", e)
 
 
 # --- ОБРАБОТЧИКИ КНОПОК ---
