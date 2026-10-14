@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 import uvicorn
 
 load_dotenv()
@@ -18,8 +19,13 @@ async def get_db_pool():
     global db_pool
     if db_pool is None:
         try:
-            db_pool = await asyncpg.create_pool(os.getenv('DATABASE_URL'))
-            print("✅ Подключено к Supabase")
+            # ВАЖНО: pool_size=5, чтобы не превысить лимит Supabase (15)
+            db_pool = await asyncpg.create_pool(
+                os.getenv('DATABASE_URL'),
+                min_size=2,
+                max_size=5
+            )
+            print("✅ Подключено к Supabase (pool_size=5)")
         except Exception as e:
             print(f"⚠️ Ошибка подключения к БД: {e}")
     return db_pool
@@ -60,7 +66,7 @@ async def cmd_add(message: types.Message):
     try:
         datetime.strptime(date_str, "%d.%m.%Y")
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Используй ДД.ММ.ГГГГ")
+        await message.answer(" Неверный формат даты. Используй ДД.ММ.ГГГГ")
         return
     pool = await get_db_pool()
     if not pool:
@@ -101,7 +107,7 @@ async def cmd_done(message: types.Message):
         return
     pool = await get_db_pool()
     if not pool:
-        await message.answer("️ База данных недоступна.")
+        await message.answer("⚠️ База данных недоступна.")
         return
     async with pool.acquire() as conn:
         result = await conn.execute("UPDATE deadlines SET is_done = TRUE WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
@@ -128,7 +134,7 @@ async def cmd_delete(message: types.Message):
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM deadlines WHERE id = $1 AND chat_id = $2", deadline_id, message.chat.id)
     if result == "DELETE 0":
-        await message.answer("❌ Дедлайн не найден")
+        await message.answer(" Дедлайн не найден")
     else:
         await message.answer(f"🗑 Дедлайн #{deadline_id} удалён!")
 
@@ -179,14 +185,15 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    """Запускается при старте сервера"""
     await init_db()
-    # Запускаем бота в фоновой задаче
     asyncio.create_task(dp.start_polling(bot))
-    print(" Бот запущен в фоне")
+    print("🚀 Бот запущен в фоне")
 
-@app.get("/")
-async def root():
+# Поддержка и GET, и HEAD запросов (для UptimeRobot)
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root(request: Request):
+    if request.method == "HEAD":
+        return PlainTextResponse("Bot is running!", status_code=200)
     await send_reminders()
     return {"message": "Bot is running! Reminders checked."}
 
@@ -194,7 +201,6 @@ async def root():
 async def health():
     return {"status": "ok"}
 
-# Запуск через uvicorn
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     uvicorn.run(app, host='0.0.0.0', port=port)
