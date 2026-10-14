@@ -631,7 +631,7 @@ async def cmd_list(message: types.Message):
         async with pool.acquire() as conn:
             # deadline_date — TEXT формата ДД.ММ.ГГГГ, сортируем как дату
             rows = await conn.fetch(
-                "SELECT id, subject, deadline_date, is_done FROM deadlines WHERE chat_id = $1 "
+                "SELECT id, subject, deadline_date, is_done, description FROM deadlines WHERE chat_id = $1 "
                 "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY')",
                 message.chat.id
             )
