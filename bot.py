@@ -1356,6 +1356,45 @@ async def cmd_dbcheck(message: types.Message):
         await report_error(message, "dbcheck", e)
 
 
+@dp.message(Command('resetuser'))
+async def cmd_resetuser(message: types.Message):
+    """Полностью удаляет пользователя или группу из базы данных (только для админа)."""
+    if not is_admin(message.chat.id):
+        await message.answer("⛔ Доступ запрещён!")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ Формат: /resetuser <chat_id>\n"
+            "Пример: <code>/resetuser -100123456789</code>\n"
+            "⚠️ Будь осторожен, это удалит все дедлайны и прогресс!", 
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        target_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID должен быть числом.")
+        return
+
+    pool = await get_db_pool()
+    if not pool:
+        return
+        
+    try:
+        async with pool.acquire() as conn:
+            # Удаляем дедлайны
+            await conn.execute("DELETE FROM deadlines WHERE chat_id = $1", target_id)
+            # Удаляем профиль пользователя
+            await conn.execute("DELETE FROM users WHERE chat_id = $1", target_id)
+            
+        await message.answer(f"✅ Пользователь/группа с ID <code>{target_id}</code> полностью удалён из базы данных!", parse_mode="HTML")
+        await log_action(message.chat.id, "admin", "resetuser", f"Target: {target_id}")
+    except Exception as e:
+        await report_error(message, "сброса пользователя", e)
+
 # --- ОБРАБОТЧИКИ КНОПОК ---
 
 @dp.message(F.text == BTN_ADD)
