@@ -50,6 +50,11 @@ class AdminStates(StatesGroup):
     waiting_for_userdeadlines_id = State()
 
 
+def example_date() -> str:
+    """Дата для примеров в подсказках — завтрашняя, чтобы пример не устаревал."""
+    return (today_date() + timedelta(days=1)).strftime("%d.%m.%Y")
+
+
 def format_deadline_when(date_str, time_str) -> str:
     """'18.10.2026' + '12:30' -> '18.10.2026 в 12:30' (время 23:59 по умолчанию не показываем)."""
     if time_str and time_str != DEFAULT_TIME:
@@ -853,12 +858,13 @@ async def cmd_help(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-ADD_USAGE = (
-    "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [ЧЧ:ММ] [описание]\n\n"
-    "Пример: <code>/add Математика 15.10.2026 14:30 Решить задачи 1-10</code>\n\n"
-    f"Время необязательно (по умолчанию {DEFAULT_TIME})\n"
-    "Описание необязательно, но полезно!"
-)
+def add_usage() -> str:
+    return (
+        "❌ <b>Формат:</b> /add &lt;предмет&gt; &lt;ДД.ММ.ГГГГ&gt; [ЧЧ:ММ] [описание]\n\n"
+        f"Пример: <code>/add Математика {example_date()} 14:30 Решить задачи 1-10</code>\n\n"
+        f"Время необязательно (по умолчанию {DEFAULT_TIME})\n"
+        "Описание необязательно, но полезно!"
+    )
 
 
 @dp.message(Command('add'))
@@ -868,13 +874,13 @@ async def cmd_add(message: types.Message):
 
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer(ADD_USAGE, parse_mode="HTML")
+        await message.answer(add_usage(), parse_mode="HTML")
         return
 
     # Ищем дату ДД.ММ.ГГГГ
     date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', args[1])
     if not date_match:
-        await message.answer("❌ Не нашёл дату. Используй формат ДД.ММ.ГГГГ\n\n" + ADD_USAGE, parse_mode="HTML")
+        await message.answer("❌ Не нашёл дату. Используй формат ДД.ММ.ГГГГ\n\n" + add_usage(), parse_mode="HTML")
         return
 
     date_str = date_match.group(1)
@@ -962,15 +968,15 @@ async def cmd_list(message: types.Message):
                 "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY'), deadline_time",
                 message.chat.id
             )
-if not rows:
-    await message.answer(
-        "📭 <b>Дедлайнов пока нет.</b>\n\n"
-        "Добавь первый: <code>/add Предмет ДД.ММ.ГГГГ [ЧЧ:ММ] [описание]</code>\n\n"
-        "Пример: <code>/add Математика 20.10.2026 14:30 Решить задачи 1-10</code>\n\n"
-        "Время необязательно (по умолчанию 23:59)",
-        parse_mode="HTML"
-    )
-    return
+        if not rows:
+            await message.answer(
+                "📭 <b>Дедлайнов пока нет.</b>\n\n"
+                "Добавь первый: <code>/add Предмет ДД.ММ.ГГГГ [ЧЧ:ММ] [описание]</code>\n\n"
+                f"Пример: <code>/add Математика {example_date()} 14:30 Решить задачи 1-10</code>\n\n"
+                f"Время необязательно (по умолчанию {DEFAULT_TIME})",
+                parse_mode="HTML"
+            )
+            return
         text = "╔══════════════════════════╗\n        📋 <b>ТВОИ ДЕДЛАЙНЫ</b>\n╚══════════════════════════╝\n\n"
         for row in rows:
             status = "✅" if row['is_done'] else "⏳"
@@ -1359,7 +1365,7 @@ async def btn_add(message: types.Message):
     await message.answer(
         "➕ <b>Добавить дедлайн</b>\n\n"
         "Формат: <code>/add Предмет ДД.ММ.ГГГГ [ЧЧ:ММ] [описание]</code>\n\n"
-        "Пример: <code>/add Математика 15.10.2026 14:30 Решить задачи 1-10</code>\n\n"
+        f"Пример: <code>/add Математика {example_date()} 14:30 Решить задачи 1-10</code>\n\n"
         f"Время необязательно (по умолчанию {DEFAULT_TIME})\n"
         "Описание необязательно, но полезно!\n\n"
         f"🎁 +{XP_ADD_DEADLINE} XP за каждый дедлайн!",
