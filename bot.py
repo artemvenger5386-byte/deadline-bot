@@ -48,6 +48,7 @@ class AdminStates(StatesGroup):
     waiting_for_takexp_id = State()
     waiting_for_takexp_amount = State()
     waiting_for_userdeadlines_id = State()
+    waiting_for_resetuser_id = State()
 
 
 def example_date() -> str:
@@ -408,6 +409,7 @@ BTN_ANALYTICS = "📈 Аналитика"
 BTN_GIVEXP = "💰 Начислить XP"
 BTN_TAKEXP = "📉 Списать XP"
 BTN_USERDEADLINES = "📋 Дедлайны юзера"
+BTN_RESETUSER = "🗑️ Сбросить пользователя"
 BTN_BACK = "◀️ Главное меню"
 
 
@@ -434,7 +436,7 @@ def get_admin_keyboard():
             [KeyboardButton(text=BTN_USERS), KeyboardButton(text=BTN_LOGS)],
             [KeyboardButton(text=BTN_BROADCAST)],
             [KeyboardButton(text=BTN_GIVEXP), KeyboardButton(text=BTN_TAKEXP)],
-            [KeyboardButton(text=BTN_USERDEADLINES)],
+            [KeyboardButton(text=BTN_USERDEADLINES), KeyboardButton(text=BTN_RESETUSER)],
             [KeyboardButton(text=BTN_BACK)],
         ],
         resize_keyboard=True,
@@ -787,6 +789,57 @@ async def show_user_deadlines(message: types.Message, target_chat_id: int):
         await send_long(message, text, parse_mode="HTML", reply_markup=get_admin_keyboard())
     except Exception as e:
         await report_error(message, "просмотра дедлайнов юзера", e)
+
+
+@dp.message(AdminStates.waiting_for_resetuser_id, F.text)
+async def process_resetuser_id(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await state.clear()
+        return
+    if message.text.strip().startswith("/"):
+        await state.clear()
+        await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
+        return
+    try:
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуй ещё раз или /cancel для отмены.")
+        return
+    
+    await state.clear()
+    
+    pool = await get_db_pool()
+    if not pool:
+        await message.answer("⚠️ База данных недоступна", reply_markup=get_admin_keyboard())
+        return
+    
+    try:
+        async with pool.acquire() as conn:
+            # Сначала проверяем, существует ли пользователь
+            user = await conn.fetchrow("SELECT full_name, username FROM users WHERE chat_id = $1", target_id)
+            if not user:
+                await message.answer(
+                    f"❌ Пользователь с ID {target_id} не найден в базе.",
+                    reply_markup=get_admin_keyboard()
+                )
+                return
+            
+            name = user['full_name'] or user['username'] or "Неизвестно"
+            
+            # Удаляем дедлайны
+            await conn.execute("DELETE FROM deadlines WHERE chat_id = $1", target_id)
+            # Удаляем профиль
+            await conn.execute("DELETE FROM users WHERE chat_id = $1", target_id)
+        
+        await message.answer(
+            f"✅ Пользователь <b>{esc(name)}</b> (ID: {target_id}) полностью удалён!\n"
+            f"️ Все дедлайны и прогресс стёрты.",
+            reply_markup=get_admin_keyboard(),
+            parse_mode="HTML"
+        )
+        await log_action(message.chat.id, "admin", "resetuser", f"Target: {target_id}, Name: {name}")
+    except Exception as e:
+        await report_error(message, "сброса пользователя", e)
 
 
 # --- ОБЫЧНЫЕ КОМАНДЫ ---
@@ -1529,6 +1582,25 @@ async def btn_admin_givexp(message: types.Message, state: FSMContext):
         "💰 <b>Начислить XP пользователю</b>\n\n"
         "Введи ID пользователя (chat_id):\n"
         "Пример: <code>123456789</code>\n\n"
+        "Отмена: /cancel",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == BTN_RESETUSER)
+async def btn_admin_resetuser(message: types.Message, state: FSMContext):
+    if not is_admin(message.chat.id):
+        await message.answer(" Доступ запрещён!")
+        return
+    await state.set_state(AdminStates.waiting_for_resetuser_id)
+    await message.answer(
+        "️ <b>Сбросить пользователя</b>\n\n"
+        "Введи ID пользователя или группы (chat_id):\n"
+        "Пример: <code>123456789</code> или <code>-100123456789</code>\n\n"
+        "⚠️ <b>Внимание!</b> Это удалит:\n"
+        "• Весь прогресс (XP, уровень)\n"
+        "• Все дедлайны\n"
+        "• ФИО и группу\n\n"
         "Отмена: /cancel",
         parse_mode="HTML"
     )
