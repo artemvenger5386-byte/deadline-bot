@@ -962,14 +962,15 @@ async def cmd_list(message: types.Message):
                 "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY'), deadline_time",
                 message.chat.id
             )
-        if not rows:
-            await message.answer(
-                "📭 <b>Дедлайнов пока нет.</b>\n\n"
-                "Добавь первый: <code>/add Предмет ДД.ММ.ГГГГ [описание]</code>\n\n"
-                "Пример: <code>/add Математика 15.10.2026 Решить задачи 1-10</code>",
-                parse_mode="HTML"
-            )
-            return
+if not rows:
+    await message.answer(
+        "📭 <b>Дедлайнов пока нет.</b>\n\n"
+        "Добавь первый: <code>/add Предмет ДД.ММ.ГГГГ [ЧЧ:ММ] [описание]</code>\n\n"
+        "Пример: <code>/add Математика 20.10.2026 14:30 Решить задачи 1-10</code>\n\n"
+        "Время необязательно (по умолчанию 23:59)",
+        parse_mode="HTML"
+    )
+    return
         text = "╔══════════════════════════╗\n        📋 <b>ТВОИ ДЕДЛАЙНЫ</b>\n╚══════════════════════════╝\n\n"
         for row in rows:
             status = "✅" if row['is_done'] else "⏳"
