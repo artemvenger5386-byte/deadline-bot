@@ -50,6 +50,13 @@ class AdminStates(StatesGroup):
     waiting_for_userdeadlines_id = State()
 
 
+def format_deadline_when(date_str, time_str) -> str:
+    """'18.10.2026' + '12:30' -> '18.10.2026 в 12:30' (время 23:59 по умолчанию не показываем)."""
+    if time_str and time_str != DEFAULT_TIME:
+        return f"{date_str} в {time_str}"
+    return str(date_str)
+
+
 def esc(value) -> str:
     return html.escape(str(value)) if value is not None else ""
 
@@ -748,8 +755,8 @@ async def show_user_deadlines(message: types.Message, target_chat_id: int):
             group = user['group_number'] if user else None
 
             rows = await conn.fetch(
-                "SELECT id, subject, deadline_date, is_done, description FROM deadlines "
-                "WHERE chat_id = $1 ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY')",
+                "SELECT id, subject, deadline_date, deadline_time, is_done, description FROM deadlines "
+                "WHERE chat_id = $1 ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY'), deadline_time",
                 target_chat_id
             )
 
@@ -764,7 +771,10 @@ async def show_user_deadlines(message: types.Message, target_chat_id: int):
         text = f"📋 <b>Дедлайны пользователя:</b>\n{esc(name)}{group_text} (ID: {target_chat_id})\n\n"
         for row in rows:
             status = "✅" if row['is_done'] else "⏳"
-            text += f"{status} #{row['id']} {esc(row['subject'])} ({row['deadline_date']})\n"
+            text += (
+                f"{status} #{row['id']} {esc(row['subject'])} "
+                f"({format_deadline_when(row['deadline_date'], row['deadline_time'])})\n"
+            )
             if row.get('description'):
                 text += f"   📝 {esc(row['description'])}\n"
             text += "\n"
@@ -947,8 +957,9 @@ async def cmd_list(message: types.Message):
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, subject, deadline_date, is_done, description FROM deadlines WHERE chat_id = $1 "
-                "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY')",
+                "SELECT id, subject, deadline_date, deadline_time, is_done, description "
+                "FROM deadlines WHERE chat_id = $1 "
+                "ORDER BY is_done, to_date(deadline_date, 'DD.MM.YYYY'), deadline_time",
                 message.chat.id
             )
         if not rows:
@@ -962,7 +973,8 @@ async def cmd_list(message: types.Message):
         text = "╔══════════════════════════╗\n        📋 <b>ТВОИ ДЕДЛАЙНЫ</b>\n╚══════════════════════════╝\n\n"
         for row in rows:
             status = "✅" if row['is_done'] else "⏳"
-            text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {row['deadline_date']}\n"
+            when = format_deadline_when(row['deadline_date'], row['deadline_time'])
+            text += f"{status} <b>#{row['id']}</b> {esc(row['subject'])}\n   📅 {when}\n"
             if row.get('description'):
                 text += f"   📝 {esc(row['description'])}\n"
             text += "\n"
